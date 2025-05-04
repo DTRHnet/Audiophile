@@ -1,5 +1,7 @@
 # Audiophile
 
+![](audiophile.png)
+
 ## A Continuous Audio Transcription Pipeline
 
 
