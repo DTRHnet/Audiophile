@@ -72,14 +72,14 @@ I. ```bash
    ```bash
    mkdir -p ~/storage/shared/Obsidian/transcripts
    ```
-2. **Copy Script**: Save the provided Bash script as `record.sh` in your Termux home directory.
+2. **Copy Script**: Save the provided Bash script as `DTRH-Audiophile.sh` in your Termux home directory.
 3. **Make Executable**:
    ```bash
-   chmod +x record.sh
+   chmod +x DTRH-Audiophile.sh
    ```
 4. **Run**:
    ```bash
-   ./record.sh
+   ./DTRH-Audiophile.sh
    ```
    Press `Ctrl+C` to stop the recording loop.
 
@@ -91,7 +91,7 @@ To use a different Whisper model:
    ```bash
    wget -c https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin -P models/
    ```
-2. **Update Script**: Modify the `MODEL` variable in `record.sh`:
+2. **Update Script**: Modify the `MODEL` variable in `DTRH-Audiophile.sh`:
    ```bash
    MODEL="$HOME/whisper.cpp/models/ggml-base.en.bin"
    ```
@@ -105,12 +105,12 @@ Enhance automation by integrating with Tasker:
 1. **Install Termux:Tasker**: Available on [F-Droid](https://f-droid.org/en/packages/com.termux.tasker/).
 2. **Create Tasker Profile**:
    - **Trigger**: Define your desired trigger (e.g., specific time, event).
-   - **Action**: Add a Termux action to execute `record.sh`.
+   - **Action**: Add a Termux action to execute `DTRH-Audiophile.sh`.
 3. **Configure Termux:Tasker**:
-   - Place `record.sh` in `~/.termux/tasker/`.
+   - Place `DTRH-Audiophile.sh` in `~/.termux/tasker/`.
    - Ensure the script is executable:
      ```bash
-     chmod +x ~/.termux/tasker/record.sh
+     chmod +x ~/.termux/tasker/DTRH-Audiophile.sh
      ```
 
 This setup allows automated recording sessions based on defined triggers.
