@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Audiophile Web Client</title>
+    <style>
+      body { font-family: system-ui, sans-serif; margin: 2rem; }
+      .row { display: flex; gap: 1rem; align-items: center; margin-bottom: .75rem; }
+      textarea { width: 100%; height: 180px; }
+      #log { font-family: ui-monospace, monospace; white-space: pre-wrap; border: 1px solid #ddd; padding: .5rem; height: 160px; overflow: auto; }
+      button { padding: .5rem .9rem; }
+      input[type="number"] { width: 6rem; }
+    </style>
+  </head>
+  <body>
+    <h1>Audiophile Web Client</h1>
+
+    <div class="row">
+      <label>Server URL <input id="server" value="" placeholder="http://localhost:8000" /></label>
+      <label>Chunk (s) <input id="chunk" type="number" min="5" max="120" value="20" /></label>
+      <label>Language <input id="lang" value="auto" /></label>
+      <button id="create">Create Session</button>
+      <span id="sid"></span>
+    </div>
+
+    <div class="row">
+      <button id="start">Start</button>
+      <button id="stop" disabled>Stop</button>
+      <button id="fetch" disabled>Fetch Transcript</button>
+    </div>
+
+    <h3>Transcript</h3>
+    <textarea id="out" readonly></textarea>
+
+    <h3>Log</h3>
+    <div id="log"></div>
+
+    <script>
+      const $ = (id) => document.getElementById(id);
+      const log = (m) => { const el = $('log'); el.textContent += m + '\n'; el.scrollTop = el.scrollHeight; };
+
+      let mediaRecorder;
+      let sessionId = null;
+      let index = 0;
+      let serverBase = '';
+
+      $('create').onclick = async () => {
+        serverBase = $('server').value || window.location.origin;
+        const payload = { title: 'Web session', language: $('lang').value || null };
+        const res = await fetch(serverBase + '/v1/sessions', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+        if (!res.ok) { log('Create session failed: ' + res.status); return; }
+        const json = await res.json();
+        sessionId = json.id;
+        $('sid').textContent = 'Session: ' + sessionId;
+        $('fetch').disabled = false;
+        log('Session created ' + sessionId);
+      };
+
+      $('start').onclick = async () => {
+        if (!sessionId) { return alert('Create a session first'); }
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        const chunkSec = Math.max(5, Math.min(120, Number($('chunk').value) || 20));
+        const options = { mimeType: 'audio/webm' };
+        mediaRecorder = new MediaRecorder(stream, options);
+        index = 0;
+        mediaRecorder.ondataavailable = async (e) => {
+          if (e.data.size === 0) return;
+          const form = new FormData();
+          form.append('f', new File([e.data], `chunk_${index}.webm`, { type: 'audio/webm' }));
+          const url = `${serverBase}/v1/sessions/${sessionId}/chunks?index=${index}`;
+          try {
+            const res = await fetch(url, { method: 'POST', body: form });
+            log(`Uploaded chunk ${index}: ${res.status}`);
+          } catch (err) {
+            log('Upload error: ' + err);
+          }
+          index++;
+        };
+        mediaRecorder.start(chunkSec * 1000);
+        $('start').disabled = true; $('stop').disabled = false;
+        log('Recording started');
+      };
+
+      $('stop').onclick = () => {
+        if (mediaRecorder && mediaRecorder.state !== 'inactive') mediaRecorder.stop();
+        $('start').disabled = false; $('stop').disabled = true;
+        log('Recording stopped');
+      };
+
+      $('fetch').onclick = async () => {
+        if (!sessionId) return;
+        const res = await fetch(`${serverBase}/v1/sessions/${sessionId}/transcript`);
+        if (!res.ok) { log('Fetch transcript failed: ' + res.status); return; }
+        const json = await res.json();
+        $('out').value = json.text;
+        log('Transcript fetched');
+      }
+    </script>
+  </body>
+  </html>
+

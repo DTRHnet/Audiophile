@@ -1,0 +1,27 @@
+[build]
+  publish = "server/static"
+  command = "echo Netlify builds static client only; API hosted separately"
+
+# Redirect all client routes to index.html (single page app behavior)
+[[redirects]]
+  from = "/app/*"
+  to = "/app/index.html"
+  status = 200
+
+# Proxy API requests to your server (adjust API_URL)
+# Set an environment variable API_URL in Netlify to your backend, e.g. https://api.example.com
+[[redirects]]
+  from = "/v1/*"
+  to = "{API_URL}/v1/:splat"
+  status = 200
+  force = true
+
+# Security headers
+[[headers]]
+  for = "/*"
+  [headers.values]
+    X-Frame-Options = "DENY"
+    X-Content-Type-Options = "nosniff"
+    Referrer-Policy = "no-referrer"
+    Strict-Transport-Security = "max-age=31536000; includeSubDomains; preload"
+
