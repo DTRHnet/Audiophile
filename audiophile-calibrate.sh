@@ -16,6 +16,7 @@ set -o pipefail
 SECONDS_TO_RUN="${1:-20}"
 TMPD="${TMPDIR:-$HOME/tmp}"
 OUT="$TMPD/audiophile-calib-$$.ogg"
+RAW="$TMPD/audiophile-calib-$$.raw"
 
 command -v termux-microphone-record >/dev/null || { echo "termux-api missing"; exit 1; }
 command -v ffmpeg >/dev/null || { echo "ffmpeg missing"; exit 1; }
@@ -23,7 +24,7 @@ command -v python3 >/dev/null || { echo "python3 missing"; exit 1; }
 
 cleanup() {
   termux-microphone-record -q >/dev/null 2>&1
-  rm -f "$OUT"
+  rm -f "$OUT" "$RAW"
 }
 trap cleanup EXIT INT TERM
 
@@ -36,13 +37,16 @@ termux-microphone-record -q >/dev/null 2>&1
 sleep 0.6
 
 echo "analysing $(stat -c %s "$OUT" 2>/dev/null) bytes"
+# decode to a file, not a pipe: python reads its *program* from stdin here, so
+# piping PCM into `python3 - <<PY` silently throws the samples away
 ffmpeg -hide_banner -nostdin -loglevel error -f ogg -i "$OUT" \
-       -vn -ac 1 -ar 16000 -f s16le - 2>/dev/null \
-| python3 -u - <<'PY'
+       -vn -ac 1 -ar 16000 -f s16le "$RAW" 2>/dev/null || {
+  echo "ffmpeg could not decode the recording"; exit 1; }
+python3 -u - "$RAW" <<'PY'
 import math, struct, sys
 
 SR, BLOCK = 16000, 1600
-data = sys.stdin.buffer.read()
+data = open(sys.argv[1], "rb").read()
 blocks = []
 for start in range(0, len(data) - BLOCK * 2 + 1, BLOCK * 2):
     samples = struct.unpack("<%dh" % BLOCK, data[start:start + BLOCK * 2])
@@ -61,18 +65,26 @@ print("blocks: %d (100 ms each, %.1fs of audio)" % (len(blocks), len(blocks) / 1
 for name, p in (("min", 0.0), ("p10", 0.10), ("p50", 0.50), ("p90", 0.90), ("max", 1.0)):
     print("  %-4s %7.1f dB" % (name, q(p) if p < 1.0 else blocks[-1]))
 
-quiet, loud = q(0.10), q(0.95)
 if blocks[0] <= -90.0 and blocks[-1] <= -90.0:
     print("\nALL BLOCKS ARE DIGITAL SILENCE (-91 dB).")
     print("Open the Termux app once, grant the microphone permission and retry -")
     print("Android hands silent buffers to capture that it does not allow.")
     sys.exit(2)
 
-suggest = max(-70.0, min(-40.0, quiet + 15.0))
-print("\nquiet cluster p10 = %.1f dB | loud cluster p95 = %.1f dB" % (quiet, loud))
-if loud - quiet < 10:
-    print("the two clusters are only %.1f dB apart - record silence and speech" % (loud - quiet))
-    print("in separate runs for a cleaner reading")
-print("suggested:  DTRH_SPEECH_DB=%.0f" % suggest)
+# The noise floor is the quietest third of the blocks: that estimate stays
+# correct whether the recording is pure silence or silence plus speech.
+third = max(1, len(blocks) // 3)
+quiet = sorted(blocks[:third])[third // 2]
+peak = blocks[-1]
+spread = peak - quiet
+suggest = max(-70.0, min(-35.0, quiet + 20.0))
+
+print("\nnoise floor (quietest third) = %.1f dB | loudest block = %.1f dB | spread = %.1f dB"
+      % (quiet, peak, spread))
+if spread < 12:
+    print("this recording looks like ONE level, not silence plus speech.")
+    print("run it once in silence and once while talking, and put the threshold")
+    print("between the two 'noise floor' readings.")
+print("suggested:  DTRH_SPEECH_DB=%.0f   (noise floor + 20 dB)" % suggest)
 print("i.e.        DTRH_SPEECH_DB=%.0f ./DTRH-Audiophile.sh" % suggest)
 PY

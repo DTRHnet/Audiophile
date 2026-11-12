@@ -240,7 +240,8 @@ minute): min −85.0, median −82.7, p90 −72.2, **max −54.4 dB**, floor set
 between −85.5 and −70.0. Two of 60 blocks crossed the default −55 dB
 threshold but never two in a row, so no utterance was created — that is the
 hysteresis doing its job, but it has little margin. For this phone in this
-room `DTRH_SPEECH_DB=-60` is the safer setting: it keeps ~12 dB of headroom
+room `DTRH_SPEECH_DB=-60` is the safer setting (the fixed
+`audiophile-calibrate.sh` independently suggests −61): it keeps ~12 dB of headroom
 over the 90th-percentile noise and still sits far below real speech
 (−32…−47 dB measured).
 
@@ -291,7 +292,17 @@ Each of these was found by running it, not by reading it.
    refusing to transcribe it (`drop … vdb=-50.1 reason=quiet`) but blocking
    every rotation. The size cap now also runs from the `ev=level` handler
    every 15 s, so the capture file cannot grow unbounded in any room.
-5. **Silence-deaf microphone.** Documented in §2: Android 10 hands all-zero
+5. **The calibration tool threw its own audio away.** `audiophile-calibrate.sh`
+   piped PCM into `python3 - <<PY`; a here-document redirects stdin, so python
+   read its *program* from stdin and the samples were discarded —
+   `no audio decoded - is the microphone permission granted?`, while the
+   recording was fine (93 kB). It now decodes to a temp file and passes the
+   path as an argument. Its suggestion was also rebuilt: it used the p10 of a
+   single-cluster recording, which for this room landed at −68 dB — *below*
+   the −53.8 dB transient peaks it was supposed to sit above. It now estimates
+   the noise floor from the quietest third of the blocks and suggests
+   `floor + 20 dB`, which yields **−61 dB** here.
+6. **Silence-deaf microphone.** Documented in §2: Android 10 hands all-zero
    samples to capture started while the Termux app is not running. The script
    now warns instead of quietly recording nothing.
 
