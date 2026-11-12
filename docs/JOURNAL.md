@@ -172,16 +172,15 @@ digital silence.
 ```
 ev=ready sr=16000 block_ms=100 thr=-55.0 floor=-70.0
 ev=begin t=2.10
-ev=segment … t0=0.00 t1=5.20 dur=5.20 voiced=3.00 db=-30.1 peak=-26.6 reason=silence
+ev=segment … t0=0.00 t1=5.20 dur=5.20 voiced=3.00 vdb=-30.1 reason=silence
 ev=begin t=7.60
-ev=segment … t0=5.50 t1=8.70 dur=3.20 voiced=1.00 db=-30.1 peak=-26.6 reason=silence
+ev=segment … t0=5.50 t1=8.70 dur=3.20 voiced=1.00 vdb=-30.1 reason=silence
 ev=end segments=2
 SELFTEST PASS   (segments written: 2, expected 2)
 ```
 
-End-to-end on the device with real speech (TTS played through the speaker,
-`DTRH_WORK=~/vadtest-work ./DTRH-Audiophile.sh --debug`), two utterances with
-silence between them:
+End-to-end on the device with real speech (TTS through the speaker, silence
+between utterances):
 
 ```
 [INFO] vad ready (speech>-55.0dB, floor -78.0dB)
@@ -192,32 +191,105 @@ silence between them:
 [INFO] >> 16:48:28 (4.10s) Silence gating is working as intended.
 ```
 
-Both transcripts are verbatim; whisper ran **exactly twice** in ~40 s of
-recording that contained ~5 s of speech; the idle stretches produced no
-segments, no whisper calls and no invented text. End-of-speech to segment
-emission was 1.5–2 s (the end-silence window plus decoder lag).
+Verbatim transcripts, whisper invoked exactly twice in ~40 s of recording that
+contained ~5 s of speech; the silent stretches produced no segments, no
+whisper calls and no invented text. End-of-speech → segment emission was
+1.5–2 s (the end-silence window plus decoder lag).
 
-## 6. Not yet verified (honest status)
+**Screen off (the pocket use case).** With the screen powered off via
+`KEYCODE_POWER` and the app in the background, the next utterance was still
+captured and transcribed:
 
-These were queued when the USB link was pulled and the phone was only
-reachable on WiFi with no adbd-tcpip and no sshd listening, so they are
-**untested**, not "working":
+```
+[INFO] utterance 6.10s (voiced 3.40s, -31.7dB, silence) -> whisper
+[INFO] >> 17:13:34 (6.10s) Second utterance recorded with the screen off and the app in the background.
+```
 
-* screen-off / locked-screen capture (Android 10 silences background capture in
-  some states; the script holds a wakelock and a notification, but this needs
-  an actual test)
-* the rotation path firing on a real 90 s of silence
-* multi-hour stability, capture-file growth, battery and thermal behaviour
-* ordering/latency when utterances arrive faster than whisper can transcribe
-  (the queue is currently synchronous/one-at-a-time, which keeps the journal
-  in order)
-* `tiny.en` vs `base.en` accuracy on this microphone
-* the `is_hallucination` list is small and hand-written, not learned
+**Rotation.** Both paths were exercised:
 
-## 7. Files
+* idle path: `[INFO] no speech for 30s - recycling the capture file`, followed
+  by `capture started: live-…ogg` and `vad ready`, and the next utterance was
+  transcribed normally;
+* size-cap path (forced with `DTRH_ROTATE_MAX_MB=0`): rotations every ~15 s
+  regardless of VAD state, each followed by a fresh capture file and a healthy
+  `vad ready`, with a clean stop afterwards (no strays, capture dir empty).
+
+**Graceful stop.** `--stop` → `cleanup: stopping capture and transcriber`,
+pidfile removed, recorder released, capture file deleted, zero surviving
+processes (`audiophile-vad.py`, `audiophile-follow.py`, ffmpeg).
+
+**Idle cost, measured three times:**
+
+| Configuration | Idle CPU (one core) |
+| --- | --- |
+| v3 first cut: bash feeder forking `stat`+`tail`+`head`+`sleep` ~7×/s | **21.5 %** |
+| after switching the feeder to a single `dd` per pass | 18.3 % |
+| after moving the follow loop into `audiophile-follow.py` | **7.8 %** |
+
+Attribution of the final 7.8 %: ffmpeg ~4.3 %, VAD python ~3.1 %, follower and
+orchestrator ≈ 0. For comparison, v2 ran a full whisper pass every 30 s; at
+0.4× realtime that alone is ~40 % of a core, plus an ffmpeg conversion per
+slice.
+
+## 6. What the testing broke, and what was fixed
+
+Each of these was found by running it, not by reading it.
+
+1. **Junk in the journal.** First soak run wrote `[BLANK_AUDIO]`,
+   `(birds chirping)`, `(keyboard clicking)` and `(mumbling)` into the daily
+   markdown — 4 of 8 entries. Whisper describes non-speech with a bracketed
+   annotation, so any transcription that is *entirely* `(...)` or `[...]` is
+   now dropped, along with a small canned-phrase list.
+   *Extra bug found while unit-testing the filter:* the first version of the
+   regex was `^[[:space:]]*[\(\[](.*)[\)\]][[:space:]]*$`, whose
+   backslash-escaped bracket expression never matched anything — it failed
+   silently. The working form is
+   `^[[:space:]]*(\(.*\)|\[.*\])[[:space:]]*$`, verified against 12 strings.
+2. **Transients transcribed as speech.** Doors, keyboards and the phone being
+   picked up crossed the onset threshold and produced 0.4–0.8 s "utterances"
+   at −50…−54 dB. Added a second gate: the mean level of the *voiced* blocks
+   must be ≥ `DTRH_MIN_VOICED_DB` (−50 dB); `DTRH_MIN_SPEECH_MS` went 400 →
+   500 ms; and the first `DTRH_WARMUP_MS` (1.5 s) after the recorder starts is
+   ignored, because MediaRecorder itself emits a transient when it opens.
+   Voice at −32…−47 dB still passes, distant speech at −47 dB still passes.
+3. **21.5 % of a core while idle.** The bash feeder was forking `stat`,
+   `tail`, `head` and `sleep` on every pass, ~7 forks/s forever. Replaced by
+   `audiophile-follow.py`; 7.8 % left, which is the actual decode+VAD work.
+4. **Rotation depended on silence happening.** The size cap was only evaluated
+   inside the `ev=idle` handler. A noisy room never idles — measured directly:
+   a video playing at ~−50 dB kept the VAD in `speech` for 20+ s, correctly
+   refusing to transcribe it (`drop … vdb=-50.1 reason=quiet`) but blocking
+   every rotation. The size cap now also runs from the `ev=level` handler
+   every 15 s, so the capture file cannot grow unbounded in any room.
+5. **Silence-deaf microphone.** Documented in §2: Android 10 hands all-zero
+   samples to capture started while the Termux app is not running. The script
+   now warns instead of quietly recording nothing.
+
+## 7. Limits, and what is still untested
+
+* Multi-hour stability, thermal behaviour and true battery drain are not
+  measured — only a 45–60 s idle window and a ~2 minute soak.
+* `tiny.en` accuracy vs `base.en` on this microphone is not compared. tiny.en
+  already mis-hears one word in ten ("audiophile" → "audio file") and drops
+  final clauses of quiet sentences.
+* Transcription is synchronous, so the journal stays in order but a long
+  monologue delays its own transcript by ~0.4× its length.
+* **A room is not a speaker.** A video playing nearby is indistinguishable from
+  a person talking; it gets transcribed with equal confidence (observed:
+  "I'll see you guys later." from a nearby video). This is inherent to
+  energy-based gating — the threshold decides what counts as "someone spoke",
+  not who.
+* Screen-off capture was verified in one ~30 s test, not overnight with Doze.
+* No tests with a headset, Bluetooth or speakerphone routing.
+* The canned-phrase list and the annotation rule are hand-written, not learned.
+* `DTRH_END_SILENCE_MS=1500` will split a slow speaker with long pauses into
+  several utterances; that is a tuning knob, not a bug.
+
+## 8. Files
 
 * `DTRH-Audiophile.sh` — rewritten (v2 → v3), orchestrator
-* `audiophile-vad.py` — new, the VAD/segmenter (stdin PCM → segment WAVs)
+* `audiophile-vad.py` — new, VAD/segmenter (stdin PCM → segment WAVs)
+* `audiophile-follow.py` — new, byte-exact file follower (replaces `tail -f`)
 * `audiophile-calibrate.sh` — new, prints the room's noise floor and a
-  suggested `DTRH_SPEECH_DB` for a new device/room
+  suggested `DTRH_SPEECH_DB`
 * `README.md` — updated for v3

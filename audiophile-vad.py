@@ -18,6 +18,7 @@
 # :: Configuration comes from the environment (all optional):
 # ::   VAD_OUTDIR (required) VAD_TAG VAD_SR VAD_BLOCK_MS VAD_SPEECH_DB
 # ::   VAD_MARGIN_DB VAD_PREROLL_MS VAD_ENDSIL_MS VAD_MINSPEECH_MS
+# ::   VAD_MIN_VOICED_DB VAD_WARMUP_MS
 # ::   VAD_MAXSEG_MS VAD_TAIL_MS VAD_LEVEL_EVERY_S VAD_IDLE_EVERY_S
 # :: ------------------------------------------------------------------------
 """Silence-gated speech segmenter for the Audiophile transcription pipeline."""
@@ -51,7 +52,9 @@ SPEECH_DB = _f("VAD_SPEECH_DB", -55.0)     # absolute speaking threshold
 MARGIN_DB = _f("VAD_MARGIN_DB", 10.0)      # ... or this far above the floor
 PREROLL_MS = _i("VAD_PREROLL_MS", 2000)    # audio kept from before the onset
 ENDSIL_MS = _i("VAD_ENDSIL_MS", 1500)      # silence that closes an utterance
-MINSPEECH_MS = _i("VAD_MINSPEECH_MS", 400)  # discard clicks/blips
+MINSPEECH_MS = _i("VAD_MINSPEECH_MS", 500)  # discard clicks/blips
+MIN_VOICED_DB = _f("VAD_MIN_VOICED_DB", -50.0)  # mean level of the voiced part
+WARMUP_MS = _i("VAD_WARMUP_MS", 1500)      # ignore the recorder's start transient
 MAXSEG_MS = _i("VAD_MAXSEG_MS", 120000)    # hard cap, then continue a new file
 TAIL_MS = _i("VAD_TAIL_MS", 250)           # keep a little after the last word
 OUTDIR = os.environ.get("VAD_OUTDIR", ".")
@@ -131,6 +134,8 @@ def main():
     seg_peak = 0
     seg_sum = 0.0
     seg_n = 0
+    voiced_sum = 0.0
+    voiced_n = 0
     seg_no = 0
     idle_blocks = 0
     segments = 0
@@ -140,7 +145,7 @@ def main():
     tail_blocks = max(0, TAIL_MS // BLOCK_MS)
     endsil_blocks = max(1, ENDSIL_MS // BLOCK_MS)
     maxseg_blocks = max(1, MAXSEG_MS // BLOCK_MS)
-    minsp_blocks = max(1, MINSPEECH_MS // BLOCK_MS)
+    warmup_blocks = max(0, WARMUP_MS // BLOCK_MS)
 
     emit(ev="ready", sr=SR, block_ms=BLOCK_MS, thr="%.1f" % SPEECH_DB,
          floor="%.1f" % floor, outdir=OUTDIR)
@@ -158,9 +163,17 @@ def main():
         start = max(seg_start, buf_first)
         data = b"".join(blk for idx, blk in buf if start <= idx < end_index)
         dur = len(data) / 2.0 / SR
+        vdb = 20.0 * math.log10(math.sqrt(voiced_sum / voiced_n) / 32768.0) \
+            if voiced_n and voiced_sum else DB_FLOOR
         if not data or voiced * BLOCK_MS < MINSPEECH_MS:
             emit(ev="drop", dur="%.2f" % dur, voiced_ms=voiced * BLOCK_MS,
-                 reason="too_short")
+                 vdb="%.1f" % vdb, reason="too_short")
+            return False
+        if vdb < MIN_VOICED_DB:
+            # a door, a keyboard, the phone being picked up: it crossed the
+            # onset threshold but it is not a voice
+            emit(ev="drop", dur="%.2f" % dur, voiced_ms=voiced * BLOCK_MS,
+                 vdb="%.1f" % vdb, reason="quiet")
             return False
         seg_no += 1
         name = "%s_%s_%03d.wav" % (TAG, stamp, seg_no)
@@ -172,12 +185,15 @@ def main():
         emit(ev="segment", file=path, t0="%.2f" % (start * BLOCK_MS / 1000.0),
              t1="%.2f" % (end_index * BLOCK_MS / 1000.0), dur="%.2f" % dur,
              voiced="%.2f" % (voiced * BLOCK_MS / 1000.0),
+             vdb="%.1f" % vdb,
              db="%.1f" % mean_db, peak="%.1f" % peak_db, reason=reason)
         return True
 
     def reset_seg_stats():
-        nonlocal voiced, seg_sum, seg_n, seg_peak
+        nonlocal voiced, seg_sum, seg_n, seg_peak, voiced_sum, voiced_n
         voiced = 0
+        voiced_sum = 0.0
+        voiced_n = 0
         seg_sum = 0.0
         seg_n = 0
         seg_peak = 0
@@ -193,12 +209,16 @@ def main():
             now = index * BLOCK_MS / 1000.0
 
             # Noise floor: fall fast, climb slowly, never leave its band.
-            if db < floor:
-                floor = max(db, FLOOR_MIN)
-            elif state == "idle":
-                floor = min(FLOOR_MAX, floor + 0.05)
-            thr = max(SPEECH_DB, floor + MARGIN_DB)
-            loud = db > thr and peak > 0
+            if index < warmup_blocks:
+                thr = max(SPEECH_DB, floor + MARGIN_DB)
+                loud = False
+            else:
+                if db < floor:
+                    floor = max(db, FLOOR_MIN)
+                elif state == "idle":
+                    floor = min(FLOOR_MAX, floor + 0.05)
+                thr = max(SPEECH_DB, floor + MARGIN_DB)
+                loud = db > thr and peak > 0
 
             buf.append((index, chunk))
             index += 1
@@ -211,6 +231,8 @@ def main():
                         seg_start = max(buf_first, index - onset - preroll_blocks)
                         reset_seg_stats()
                         voiced = onset
+                        voiced_sum = sumsq
+                        voiced_n = len(chunk) // 2
                         seg_sum = sumsq
                         seg_n = len(chunk) // 2
                         seg_peak = peak
@@ -227,6 +249,8 @@ def main():
                 if loud:
                     silence = 0
                     voiced += 1
+                    voiced_sum += sumsq
+                    voiced_n += len(chunk) // 2
                     seg_sum += sumsq
                     seg_n += len(chunk) // 2
                     if peak > seg_peak:

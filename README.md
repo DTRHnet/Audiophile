@@ -30,7 +30,7 @@ and it is handed to whisper the moment the speaker stops.
 termux-microphone-record  ──►  one continuous Ogg/Opus stream (live.ogg)
                                         │  grows in place, readable while written
                                         ▼
-                              byte follower + ffmpeg (one long-lived decoder)
+                              audiophile-follow.py + ffmpeg (one long-lived decoder)
                                         │  16 kHz mono PCM
                                         ▼
                               audiophile-vad.py
@@ -57,7 +57,8 @@ Why it is built this way:
   started only for utterances that contain speech, on audio that begins
   `PREROLL_MS` before the first word and ends 250 ms after the last one.
 * **Cheap when idle.** A silent room costs a decode of 32 kB/s of Opus and a
-  VAD that does arithmetic on it — not a whisper pass.
+  VAD that does arithmetic on it — measured at 7.8 % of one core on the LG G7
+  (ffmpeg ~4.3 %, VAD ~3.1 %), against ~40 % for v2's whisper-every-30 s.
 * **Streamable container.** `.m4a`/`.aac`/`.ts` recordings are MP4 files that
   cannot be read until they are finalised. `-e opus` with a `.ogg`/`.webm`
   name produces Ogg/Opus, which can be decoded while it is being written.
@@ -114,7 +115,7 @@ in silence, so it cannot cut a word), which keeps disk use flat.
 termux-setup-storage                        # once, links Termux to Android storage
 mkdir -p ~/storage/shared/Obsidian/transcripts
 cd ~/Audiophile
-chmod +x DTRH-Audiophile.sh audiophile-vad.py audiophile-calibrate.sh
+chmod +x DTRH-Audiophile.sh audiophile-vad.py audiophile-follow.py audiophile-calibrate.sh
 ./DTRH-Audiophile.sh
 ```
 
@@ -163,9 +164,12 @@ Everything is overridable from the environment, no editing required:
 | `DTRH_MARGIN_DB` | `10` | or this far above the measured noise floor |
 | `DTRH_PREROLL_MS` | `2000` | audio kept before the first word |
 | `DTRH_END_SILENCE_MS` | `1500` | silence that closes an utterance |
-| `DTRH_MIN_SPEECH_MS` | `400` | shorter blips are discarded |
+| `DTRH_MIN_SPEECH_MS` | `500` | shorter blips are discarded |
+| `DTRH_MIN_VOICED_DB` | `-50` | mean level of the voiced part must beat this |
+| `DTRH_WARMUP_MS` | `1500` | ignore the recorder's own start transient |
 | `DTRH_MAX_SEGMENT_MS` | `120000` | split a long monologue |
 | `DTRH_ROTATE_IDLE_S` | `90` | recycle the capture file after this much silence |
+| `DTRH_ROTATE_MAX_MB` | `64` | hard size cap; enforced even in a noisy room |
 | `DTRH_THREADS` | `4` | whisper threads |
 | `DTRH_WORK` | `~/storage/shared/Obsidian/transcripts` | output directory |
 | `DTRH_MODEL` | `~/whisper.cpp/models/ggml-tiny.en.bin` | model |
@@ -197,11 +201,13 @@ machine without needing speech or a microphone.
    - **Trigger**: Define your desired trigger (e.g., specific time, event).
    - **Action**: Add a Termux action to execute `DTRH-Audiophile.sh`.
 3. **Configure Termux:Tasker**:
-   - Place `DTRH-Audiophile.sh`, `audiophile-vad.py` and
-     `audiophile-calibrate.sh` in `~/.termux/tasker/`.
+   - Place `DTRH-Audiophile.sh`, `audiophile-vad.py`, `audiophile-follow.py`
+     and `audiophile-calibrate.sh` in `~/.termux/tasker/`.
    - Ensure they are executable:
      ```bash
-     chmod +x ~/.termux/tasker/DTRH-Audiophile.sh ~/.termux/tasker/audiophile-vad.py
+     chmod +x ~/.termux/tasker/DTRH-Audiophile.sh \
+              ~/.termux/tasker/audiophile-vad.py \
+              ~/.termux/tasker/audiophile-follow.py
      ```
 
 ### 5b. Obsidian Integration
@@ -239,8 +245,16 @@ machine without needing speech or a microphone.
 * **Two sentences are glued together.** Decrease `DTRH_END_SILENCE_MS`.
 * **Nothing is ever detected in a noisy room.** Raise `DTRH_SPEECH_DB`
   (e.g. `-45`) or run `./audiophile-calibrate.sh`.
-* **Empty or invented transcriptions.** Check `LOG_LEVEL=DEBUG` for
-  `dropped whisper artefact` lines; those are filtered automatically. Larger
+* **Some utterances leave no entry in the journal.** Run with `--debug` and
+  look for `dropped whisper artefact (non-speech annotation): "(music)"` or
+  `dropped 3.2s of audio: quiet`. Whisper describes non-speech with bracketed
+  annotations and they are dropped on purpose; `quiet` means the segment never
+  got above `DTRH_MIN_VOICED_DB`.
+* **Whisper ran but nothing was written.** Same thing — the audio was music,
+  a video or a door, not a voice. Raise or lower `DTRH_MIN_VOICED_DB` to taste.
+* **The capture file keeps growing.** It is recycled after 90 s of silence, and
+  hard-capped by `DTRH_ROTATE_MAX_MB` even when the room is never quiet (a
+  noisy room never reports idle). Lower the cap if disk is tight. Larger
   models make fewer mistakes: `DTRH_MODEL=~/whisper.cpp/models/ggml-base.en.bin`.
 * **It stops overnight.** Make sure the Termux wake lock is held
   (`termux-wake-lock`, done by the script) and disable battery optimisation for

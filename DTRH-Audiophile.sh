@@ -46,6 +46,7 @@ set -o pipefail
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VAD_PY="$DIR/audiophile-vad.py"
+FOLLOW_PY="$DIR/audiophile-follow.py"
 
 # --- CONFIGURATION ---------------------------------------------------------
 PIDFILE="$DIR/DTRH-Audiophile.pid"
@@ -65,7 +66,9 @@ SPEECH_DB="${DTRH_SPEECH_DB:--55}"       # a block louder than this is speech
 MARGIN_DB="${DTRH_MARGIN_DB:-10}"        # ...or this far above the noise floor
 PREROLL_MS="${DTRH_PREROLL_MS:-2000}"    # keep this much audio before the onset
 END_SILENCE_MS="${DTRH_END_SILENCE_MS:-1500}"  # silence that closes an utterance
-MIN_SPEECH_MS="${DTRH_MIN_SPEECH_MS:-400}"
+MIN_SPEECH_MS="${DTRH_MIN_SPEECH_MS:-500}"
+MIN_VOICED_DB="${DTRH_MIN_VOICED_DB:--50}"   # mean level of the voiced part
+WARMUP_MS="${DTRH_WARMUP_MS:-1500}"          # ignore the recorder start transient
 MAX_SEGMENT_MS="${DTRH_MAX_SEGMENT_MS:-120000}"
 
 # housekeeping
@@ -123,6 +126,7 @@ show_settings() {
   printf "${YEL}%-22s${NC}: %s\n" "Model"           "$(shorten_path "$MODEL")"
   printf "${YEL}%-22s${NC}: %-40s\n" "VAD thresholds" "speech>${SPEECH_DB}dB or floor+${MARGIN_DB}dB"
   printf "${YEL}%-22s${NC}: %-40s\n" "Utterance window" "preroll ${PREROLL_MS}ms / end-silence ${END_SILENCE_MS}ms"
+  printf "${YEL}%-22s${NC}: %-40s\n" "Reject" "voiced<${MIN_SPEECH_MS}ms or <${MIN_VOICED_DB}dB"
   printf "${YEL}%-22s${NC}: %-40s\n" "Max segment"    "$(( MAX_SEGMENT_MS / 1000 ))s"
   printf "${YEL}%-22s${NC}: %-40s\n" "Capture"        "${CAPTURE_ENC} ${CAPTURE_BITRATE}kbps (streamed, no slicing)"
   printf "${YEL}%-22s${NC}: %-40s\n" "Rotate after"   "${ROTATE_IDLE_S}s of silence"
@@ -231,6 +235,7 @@ have termux-microphone-record || die "termux-api missing: pkg install termux-api
 have ffmpeg                   || die "ffmpeg missing: pkg install ffmpeg"
 have python3                  || die "python3 missing: pkg install python"
 [[ -f "$VAD_PY" ]]            || die "audiophile-vad.py not found next to this script"
+[[ -f "$FOLLOW_PY" ]]         || die "audiophile-follow.py not found next to this script"
 [[ -x "$WHISPER" ]]           || die "whisper-cli not found at $(shorten_path "$WHISPER")"
 [[ -s "$MODEL" ]]             || die "model not found at $(shorten_path "$MODEL")"
 
@@ -265,6 +270,9 @@ TOTAL_SEGMENTS=0
 TOTAL_MS=0
 LAST_NOTIFY=0
 MIC_SILENT_WARNED=0
+LEVEL_TICKS=0
+QUIET_DROPS=0
+QUIET_ADVISED=0
 SHUTTING_DOWN=0
 
 # --- RECORDER --------------------------------------------------------------
@@ -306,20 +314,6 @@ rec_stop() {
 # tail -f cannot be used here: ffmpeg refuses an ogg pipe that arrives through
 # it ("End of file" on open).  Reading the file ourselves and holding the pipe
 # open works and lets us follow the live container byte-exactly.
-feed_stream() {
-  local f="$1" pos=0 sz avail
-  while :; do
-    sz=$(stat -c %s "$f" 2>/dev/null) || sz=0
-    if (( sz < pos )); then pos=0; fi        # truncated / replaced
-    if (( sz > pos )); then
-      avail=$(( sz - pos ))
-      tail -c +$(( pos + 1 )) "$f" 2>/dev/null | head -c "$avail"
-      pos=$(( pos + avail ))
-    else
-      sleep 0.2
-    fi
-  done
-}
 
 # --- PIPELINE --------------------------------------------------------------
 pipeline_stop() {
@@ -341,11 +335,12 @@ pipeline_start() {
   export VAD_OUTDIR="$CAPTURE_DIR/segments" VAD_TAG="seg" \
          VAD_SPEECH_DB="$SPEECH_DB" VAD_MARGIN_DB="$MARGIN_DB" \
          VAD_PREROLL_MS="$PREROLL_MS" VAD_ENDSIL_MS="$END_SILENCE_MS" \
-         VAD_MINSPEECH_MS="$MIN_SPEECH_MS" VAD_MAXSEG_MS="$MAX_SEGMENT_MS"
+         VAD_MINSPEECH_MS="$MIN_SPEECH_MS" VAD_MAXSEG_MS="$MAX_SEGMENT_MS" \
+         VAD_MIN_VOICED_DB="$MIN_VOICED_DB" VAD_WARMUP_MS="$WARMUP_MS"
   mkdir -p "$VAD_OUTDIR"
   set -m   # own process group, so the whole chain can be signalled at once
   (
-    feed_stream "$live" 2>/dev/null \
+    python3 -u "$FOLLOW_PY" "$live" 0.15 2>>"$LOGFILE" \
       | ffmpeg -hide_banner -nostdin -loglevel error -f ogg -i - \
                -vn -ac 1 -ar 16000 -f s16le - 2>>"$LOGFILE" \
       | python3 -u "$VAD_PY" 2>>"$LOGFILE"
@@ -354,6 +349,21 @@ pipeline_start() {
   set +m
   exec 7<"$EVFIFO"
   return 0
+}
+
+capture_size_kb() { echo $(( $(stat -c %s "$LIVE" 2>/dev/null || echo 0) / 1024 )); }
+
+# The size cap must not depend on the room ever being quiet: in a noisy room
+# the VAD never reports idle, which used to mean the capture file grew without
+# bound. Called from the level event, so it always gets evaluated.
+size_cap_check() {
+  local size_kb; size_kb=$(capture_size_kb)
+  if (( size_kb > ROTATE_MAX_MB * 1024 )); then
+    log_warn "capture file reached ${size_kb}kB (cap ${ROTATE_MAX_MB}MB) - recycling"
+    rotate_capture || log_error "rotation failed"
+    return 0
+  fi
+  return 1
 }
 
 rotate_capture() {
@@ -386,15 +396,26 @@ audit_line() { # $1=wav $2=t0 $3=dur $4=db $5=peak $6=text
     "$(printf '%s' "$6" | sed 's/\\/\\\\/g; s/"/\\"/g')" >>"$AUDIT_JSONL"
 }
 
-# Phrases whisper invents when it is fed something that is not speech.
+# Whisper answers non-speech with annotations - "(birds chirping)",
+# "[BLANK_AUDIO]", "(keyboard clicking)" - and, fed silence, with canned
+# phrases. Neither belongs in a journal.
+HALLU_REASON=""
 is_hallucination() {
-  local t="${1,,}"
-  t="${t//[[:punct:]]/}"
-  t="${t// /}"
+  local text="$1" t
+  HALLU_REASON=""
+  if [[ "$text" =~ ^[[:space:]]*(\(.*\)|\[.*\])[[:space:]]*$ ]]; then
+    HALLU_REASON="non-speech annotation"
+    return 0
+  fi
+  t="${text,,}"
+  t="${t//[^[:alnum:]]/}"
   case "$t" in
-    ""|you|thankyou|thanksforwatching|thankyouforwatching|please|subscribe|\
-    thanksforwatchingandsubscribing|subscribetomychannel|bye|okay|mhm|\
-    silencenoise|[[]blank_audio[]]|transcriptionby|amaraorg) return 0;;
+    ""|you|thankyou|thanks|thanksforwatching|thankyouforwatching|\
+    thanksforwatchingandsubscribing|pleasesubscribe|subscribe|\
+    subscribetomychannel|bye|blankaudio|silence|noise|mm|\
+    transcriptionby|amaraorg|subtitlesby)
+      HALLU_REASON="canned whisper phrase"
+      return 0;;
   esac
   return 1
 }
@@ -419,7 +440,7 @@ transcribe() { # $1=wav $2=stream t0 $3=dur $4=db $5=peak
   if [[ -z "$text" ]]; then
     log_debug "no words in $(basename "$wav") - dropped"
   elif is_hallucination "$text"; then
-    log_debug "dropped whisper artefact: \"$text\""
+    log_debug "dropped whisper artefact ($HALLU_REASON): \"$text\""
   else
     append_md "$hhmmss" "$dur" "$text"
     audit_line "$wav" "$t0" "$dur" "$db" "$peak" "$text"
@@ -464,6 +485,7 @@ handle_event() {
       elif [[ "$db" != "-91.0" ]]; then
         MIC_SILENT_WARNED=1
       fi
+      (( ++LEVEL_TICKS % 15 == 0 )) && size_cap_check
       maybe_notify;;
     begin)
       log_debug "speech onset at $(kv_get t "$line")s";;
@@ -475,17 +497,26 @@ handle_event() {
       log_info "utterance ${dur}s (voiced $(kv_get voiced "$line")s, ${db}dB, ${reason}) -> whisper"
       transcribe "$file" "$t0" "$dur" "$db" "$peak";;
     drop)
-      log_debug "dropped $(kv_get dur "$line")s of audio: $(kv_get reason "$line")";;
+      local reason; reason=$(kv_get reason "$line")
+      log_debug "dropped $(kv_get dur "$line")s of audio: ${reason} (voiced $(kv_get voiced_ms "$line")ms, $(kv_get vdb "$line")dB)"
+      if [[ "$reason" == "quiet" ]]; then
+        QUIET_DROPS=$(( QUIET_DROPS + 1 ))
+        if (( QUIET_DROPS == 20 && QUIET_ADVISED == 0 )); then
+          QUIET_ADVISED=1
+          log_warn "20 utterances rejected as too quiet - this room is noisy at your current threshold"
+          log_warn "run ./audiophile-calibrate.sh or raise DTRH_SPEECH_DB (now ${SPEECH_DB}dB)"
+        fi
+      fi;;
     idle)
       local secs; secs=$(kv_get seconds "$line")
       local age=$(( $(date +%s) - LIVE_STARTED ))
-      local size_kb=$(( $(stat -c %s "$LIVE" 2>/dev/null || echo 0) / 1024 ))
+      local size_kb; size_kb=$(capture_size_kb)
+      log_debug "idle ${secs}s (capture age ${age}s, ${size_kb}kB; rotate at ${ROTATE_IDLE_S}s idle / ${ROTATE_MIN_AGE_S}s age)"
       if (( secs >= ROTATE_IDLE_S && age >= ROTATE_MIN_AGE_S )); then
         log_info "no speech for ${secs}s - recycling the capture file"
         rotate_capture || log_error "rotation failed"
-      elif (( size_kb > ROTATE_MAX_MB * 1024 )); then
-        log_warn "capture file reached ${size_kb}kB - recycling"
-        rotate_capture || log_error "rotation failed"
+      else
+        size_cap_check
       fi;;
     error)
       log_error "vad error: $(kv_get msg "$line")";;
