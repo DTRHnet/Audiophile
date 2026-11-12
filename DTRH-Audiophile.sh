@@ -3,9 +3,26 @@
 # ::
 # :: DTRH-Audiophile.sh
 # ::   A real-time audio to text logger for Termux (Android)
-# ::   Version: 2.0.0
+# ::   Version: 3.0.0
 # ::
 # ::   Author: KBS - DTRH.net
+# :: --------------------------------------------------------------------
+# ::   v3 "silence gating" rewrite
+# ::
+# ::   v2 recorded fixed 30-second slices and transcribed every one of them,
+# ::   silence included. Whisper answers silence with invented text ("you",
+# ::   "Thank you.") and burned a full whisper pass every 30s whether anyone
+# ::   was talking or not.
+# ::
+# ::   v3 records ONE continuous Ogg/Opus stream, decodes it through a single
+# ::   long-lived ffmpeg, and lets audiophile-vad.py decide where an utterance
+# ::   starts and ends from the microphone's own noise floor. Whisper is only
+# ::   started when someone actually spoke, on audio that starts PREROLL ms
+# ::   before the first word and stops ENDSILENCE ms after the last one.
+# ::
+# ::   Recording is never chopped mid-sentence, so no words are lost between
+# ::   slices, and a silent room costs ~1% of one core instead of a whisper
+# ::   run every 30 seconds.
 # :: --------------------------------------------------------------------
 
 # --- ASCII BANNER ----------------------------------------------------------
@@ -14,104 +31,210 @@ cat <<'EOF'
   ___  _   _______ _____ ___________ _   _ _____ _      _____
  / _ \| | | |  _  \_   _|  _  | ___ \ | | |_   _| |    |  ___|
 / /_\ \ | | | | | | | | | | | | |_/ / |_| | | | | |    | |__
-|  _  | | | | | | | | | | | | |  __/|  _  | | | | |    |  __|
+|  _  | | | | | | | | | | | |  __/|  _  | | | | |    |  __|
 | | | | |_| | |/ / _| |_\ \_/ / |   | | | |_| |_| |____| |___
 \_| |_/\___/|___/  \___/ \___/\_|   \_| |_/\___/\_____/\____/
 
 ------------------------[ DTRH.NET ]-------------------------
  admin[AT]dtrh[DOT]net                            May 05,2025
- KBS
+ KBS                                     silence gating: v3.0.0
 . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
 
 EOF
 
+set -o pipefail
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-if [[ "$1" == "--tail" ]]; then
-  tail -F "$DIR/DTRH-Audiophile.log"
-  exit 0
-fi
+VAD_PY="$DIR/audiophile-vad.py"
 
 # --- CONFIGURATION ---------------------------------------------------------
 PIDFILE="$DIR/DTRH-Audiophile.pid"
 LOGFILE="$DIR/DTRH-Audiophile.log"
-WORK="$HOME/storage/shared/Obsidian/transcripts"
-MODEL="$HOME/whisper.cpp/models/ggml-tiny.en.bin"
-INTERVAL=30
+WORK="${DTRH_WORK:-$HOME/storage/shared/Obsidian/transcripts}"
+MODEL="${DTRH_MODEL:-$HOME/whisper.cpp/models/ggml-tiny.en.bin}"
+WHISPER="${DTRH_WHISPER:-$HOME/whisper.cpp/build/bin/whisper-cli}"
+
+# capture: one continuous stream, readable while it is being written
+CAPTURE_DIR="${DTRH_CAPTURE_DIR:-${TMPDIR:-$HOME/tmp}/audiophile}"
+CAPTURE_ENC="${DTRH_ENC:-opus}"          # opus => Ogg container (streamable)
+CAPTURE_BITRATE="${DTRH_BITRATE:-32}"    # kbps
+CAPTURE_RATE="${DTRH_RATE:-16000}"       # Hz requested from the encoder
+
+# voice activity detection (silence gating)
+SPEECH_DB="${DTRH_SPEECH_DB:--55}"       # a block louder than this is speech
+MARGIN_DB="${DTRH_MARGIN_DB:-10}"        # ...or this far above the noise floor
+PREROLL_MS="${DTRH_PREROLL_MS:-2000}"    # keep this much audio before the onset
+END_SILENCE_MS="${DTRH_END_SILENCE_MS:-1500}"  # silence that closes an utterance
+MIN_SPEECH_MS="${DTRH_MIN_SPEECH_MS:-400}"
+MAX_SEGMENT_MS="${DTRH_MAX_SEGMENT_MS:-120000}"
+
+# housekeeping
+ROTATE_IDLE_S="${DTRH_ROTATE_IDLE_S:-90}"   # rotate the capture file after this much silence
+ROTATE_MIN_AGE_S="${DTRH_ROTATE_MIN_AGE_S:-120}"
+ROTATE_MAX_MB="${DTRH_ROTATE_MAX_MB:-64}"
+THREADS="${DTRH_THREADS:-4}"
+NOTIFY="${DTRH_NOTIFY:-1}"
+AUDIT="${DTRH_AUDIT:-1}"
 NOTIF_ID=1
 
-mkdir -p "$WORK"
-TODAY=$(date +%F)
-DAILY_MD="$WORK/$TODAY.md"
+REPO_LOG_LEVEL="${LOG_LEVEL:-INFO}"
+TODAY=""
+DAILY_MD=""
 
 # --- COLOR DEFINITIONS -----------------------------------------------------
-RED='\033[0;31m'
-GRN='\033[0;32m'
-BLU='\033[0;34m'
-MAG='\033[0;35m'
-YEL='\033[1;33m'
-NC='\033[0m' # No Color
+RED='\033[0;31m'; GRN='\033[0;32m'; BLU='\033[0;34m'
+MAG='\033[0;35m'; YEL='\033[1;33m'; CYN='\033[0;36m'; NC='\033[0m'
 
-
-# --- LOGGING FUNCTIONS -----------------------------------------------------
 declare -A _LEVELS=( ["ERROR"]=0 ["WARN"]=1 ["INFO"]=2 ["DEBUG"]=3 )
-LOG_LEVEL="${LOG_LEVEL:-DEBUG}"
 
+# --- LOGGING ---------------------------------------------------------------
 log() {
   local level="$1"; shift
-  local msg="$*"
-  local now="$(date '+%H:%M:%S')"
-  local color
-
+  local msg="$*" color now
+  now="$(date '+%H:%M:%S')"
+  (( _LEVELS["$level"] <= _LEVELS["$REPO_LOG_LEVEL"] )) || return 0
   case "$level" in
-    ERROR) color="$RED";;
-    WARN)  color="$YEL";;
-    INFO)  color="$GRN";;
-    DEBUG) color="$BLU";;
-    *)     color="$NC";;
+    ERROR) color="$RED";; WARN) color="$YEL";; INFO) color="$GRN";; *)
+           color="$BLU";;
   esac
-
-  if (( _LEVELS["$level"] <= _LEVELS["$LOG_LEVEL"] )); then
-    printf "${color}[%s] [%s] %s${NC}\n" "$now" "$level" "$msg" | tee -a "$LOGFILE"
-  fi
+  printf "${color}[%s] [%s] %s${NC}\n" "$now" "$level" "$msg"
+  printf "[%s] [%s] %s\n" "$(date '+%F %H:%M:%S')" "$level" "$msg" >>"$LOGFILE"
 }
-
 log_error() { log ERROR "$@"; }
 log_warn()  { log WARN  "$@"; }
 log_info()  { log INFO  "$@"; }
 log_debug() { log DEBUG "$@"; }
+die() { log_error "$@"; exit 1; }
 
-shorten_path() {
-  local path="$1"
-  echo "${path/$HOME/\$HOME}"
+shorten_path() { echo "${1/$HOME/\$HOME}"; }
+
+kv_get() { # kv_get key "k=v k=v ..."
+  local want="$1"; shift
+  local kv
+  for kv in $*; do
+    case "$kv" in "$want"=*) printf '%s' "${kv#*=}"; return 0;; esac
+  done
+  return 1
 }
 
 show_settings() {
-  echo -e "\n${MAG}========= DTRH-Audiophile Settings =========${NC}"
-
-  # Apply shortening for display
-  local sDIR=$(shorten_path "$DIR")
-  local sPIDFILE=$(shorten_path "$PIDFILE")
-  local sLOGFILE=$(shorten_path "$LOGFILE")
-  local sWORK=$(shorten_path "$WORK")
-  local sMODEL=$(shorten_path "$MODEL")
-  local sDAILY=$(shorten_path "$DAILY_MD")
-
-  # Two-column formatted output
-  printf "${YEL}%-20s${NC}: %s\n"  "Log File" "$sLOGFILE"
-  printf "${YEL}%-20s${NC}: %-40s\n" "PID File" "$sPIDFILE"
-  printf "${YEL}%-20s${NC}: %s\n"  "Transcript Dir" "$sWORK"
-  printf "${YEL}%-20s${NC}: %-40s\n" "Model Path" "$sMODEL"
-  printf "${YEL}%-20s${NC}: %s\n"  "Interval (sec)" "$INTERVAL"
-  printf "${YEL}%-20s${NC}: %-40s\n" "Today File" "$sDAILY"
-  printf "${YEL}%-20s${NC}: %s\n"  "Script PID" "$$"
-
-  echo -e "${MAG}=============================================${NC}\n"
+  echo -e "\n${MAG}========= DTRH-Audiophile v3 Settings =========${NC}"
+  printf "${YEL}%-22s${NC}: %s\n" "Transcript Dir"  "$(shorten_path "$WORK")"
+  printf "${YEL}%-22s${NC}: %s\n" "Model"           "$(shorten_path "$MODEL")"
+  printf "${YEL}%-22s${NC}: %-40s\n" "VAD thresholds" "speech>${SPEECH_DB}dB or floor+${MARGIN_DB}dB"
+  printf "${YEL}%-22s${NC}: %-40s\n" "Utterance window" "preroll ${PREROLL_MS}ms / end-silence ${END_SILENCE_MS}ms"
+  printf "${YEL}%-22s${NC}: %-40s\n" "Max segment"    "$(( MAX_SEGMENT_MS / 1000 ))s"
+  printf "${YEL}%-22s${NC}: %-40s\n" "Capture"        "${CAPTURE_ENC} ${CAPTURE_BITRATE}kbps (streamed, no slicing)"
+  printf "${YEL}%-22s${NC}: %-40s\n" "Rotate after"   "${ROTATE_IDLE_S}s of silence"
+  printf "${YEL}%-22s${NC}: %-40s\n" "Whisper threads" "$THREADS"
+  printf "${YEL}%-22s${NC}: %-40s\n" "Notifications"  "$([ "$NOTIFY" = 1 ] && echo on || echo off)"
+  printf "${YEL}%-22s${NC}: %s\n" "Log File"        "$(shorten_path "$LOGFILE")"
+  printf "${YEL}%-22s${NC}: %s\n" "Script PID"      "$$"
+  echo -e "${MAG}===============================================${NC}\n"
 }
 
-show_settings
+usage() {
+  cat <<EOF
+usage: $(basename "$0") [options]
 
-# --- PID CHECK & SINGLETON LOCK --------------------------------------------
+  (no argument)     run the transcriber
+  --tail            follow the log file
+  --stop            stop a running instance
+  --status          show whether an instance is running
+  --selftest        run the VAD state machine against a synthetic track
+  --debug           verbose (DEBUG) logging
+  --no-notify       do not touch the notification shade
+  --work DIR        transcript output directory
+  --model FILE      whisper ggml model
+  -h, --help        this text
+
+environment overrides: DTRH_SPEECH_DB DTRH_END_SILENCE_MS DTRH_PREROLL_MS
+  DTRH_MIN_SPEECH_MS DTRH_MAX_SEGMENT_MS DTRH_THREADS DTRH_WORK DTRH_MODEL
+  DTRH_ENC DTRH_BITRATE DTRH_RATE DTRH_ROTATE_IDLE_S DTRH_NOTIFY LOG_LEVEL
+EOF
+}
+
+# --- ARGUMENTS -------------------------------------------------------------
+SELFTEST=0
+while (( $# )); do
+  case "$1" in
+    --tail)      tail -F "$LOGFILE"; exit 0;;
+    --debug)     REPO_LOG_LEVEL=DEBUG;;
+    --no-notify) NOTIFY=0;;
+    --work)      WORK="$2"; shift;;
+    --model)     MODEL="$2"; shift;;
+    --selftest)  SELFTEST=1;;
+    --stop)
+      if [[ -s "$PIDFILE" ]]; then
+        pid=$(<"$PIDFILE")
+        if kill -0 "$pid" 2>/dev/null; then kill "$pid"; echo "signalled PID $pid"; exit 0; fi
+        rm -f "$PIDFILE"; echo "stale pidfile removed"; exit 0
+      fi
+      echo "not running"; exit 0;;
+    --status)
+      if [[ -s "$PIDFILE" ]] && kill -0 "$(<"$PIDFILE")" 2>/dev/null; then
+        echo "running (PID $(<"$PIDFILE"))"
+      else
+        echo "not running"
+      fi; exit 0;;
+    -h|--help)   usage; exit 0;;
+    *)           die "unknown option: $1 (try --help)";;
+  esac
+  shift
+done
+
+mkdir -p "$WORK" "$CAPTURE_DIR"
+for f in "$LOGFILE"; do : >>"$f"; done
+TODAY=$(date +%F)
+DAILY_MD="$WORK/$TODAY.md"
+AUDIT_JSONL="$WORK/.audiophile/index.jsonl"
+
+have() { command -v "$1" >/dev/null 2>&1; }
+
+# --- SELFTEST: prove the VAD state machine without touching the microphone --
+selftest() {
+  have ffmpeg || die "ffmpeg missing"
+  have python3 || die "python3 missing"
+  local t; t="$(mktemp -d)"
+  echo "== synthesising 2s silence / 3s tone / 2.5s silence / 1s tone / 2s silence =="
+  ffmpeg -hide_banner -loglevel error -y \
+    -f lavfi -i "sine=frequency=220:sample_rate=16000:duration=3,volume=0.35" \
+    -f lavfi -i "sine=frequency=330:sample_rate=16000:duration=1,volume=0.35" \
+    -f lavfi -i "anullsrc=r=16000:cl=mono" \
+    -filter_complex "[2:a]atrim=0:2[s1];[2:a]atrim=0:2.5[s2];[2:a]atrim=0:2[s3]; \
+                     [s1][0:a][s2][1:a][s3]concat=n=5:v=0:a=1,aresample=16000[a]" \
+    -map "[a]" -ac 1 -ar 16000 -f s16le "$t/track.raw" 2>/dev/null \
+    || { echo "  (fallback: simpler track)"; \
+         { head -c 64000 /dev/zero; ffmpeg -hide_banner -loglevel error -f lavfi -i "sine=frequency=220:duration=3" -ac 1 -ar 16000 -f s16le -; \
+           head -c 80000 /dev/zero; ffmpeg -hide_banner -loglevel error -f lavfi -i "sine=frequency=330:duration=1" -ac 1 -ar 16000 -f s16le -; \
+           head -c 64000 /dev/zero; } > "$t/track.raw"; }
+  echo "  track: $(stat -c %s "$t/track.raw") bytes"
+  echo "== running the VAD over it =="
+  VAD_OUTDIR="$t/out" VAD_TAG=selftest VAD_LEVEL_EVERY_S=99 \
+    python3 -u "$VAD_PY" < "$t/track.raw" | sed 's/^/  /'
+  local n; n=$(ls "$t/out"/*.wav 2>/dev/null | wc -l)
+  echo "== segments written: $n (expected 2) =="
+  for f in "$t"/out/*.wav; do
+    [[ -e "$f" ]] || continue
+    printf '  %-28s %ss audio\n' "$(basename "$f")" \
+      "$(ffprobe -v error -show_entries format=duration -of csv=p=0 "$f")"
+  done
+  (( n == 2 )) && { echo "SELFTEST PASS"; rm -rf "$t"; return 0; } \
+               || { echo "SELFTEST FAIL"; return 1; }
+}
+
+if (( SELFTEST )); then selftest; exit $?; fi
+
+# --- PRE-FLIGHT ------------------------------------------------------------
+show_settings
+have termux-microphone-record || die "termux-api missing: pkg install termux-api"
+have ffmpeg                   || die "ffmpeg missing: pkg install ffmpeg"
+have python3                  || die "python3 missing: pkg install python"
+[[ -f "$VAD_PY" ]]            || die "audiophile-vad.py not found next to this script"
+[[ -x "$WHISPER" ]]           || die "whisper-cli not found at $(shorten_path "$WHISPER")"
+[[ -s "$MODEL" ]]             || die "model not found at $(shorten_path "$MODEL")"
+
+# --- PID LOCK --------------------------------------------------------------
 if [[ -e "$PIDFILE" ]]; then
   oldpid=$(<"$PIDFILE")
   if kill -0 "$oldpid" 2>/dev/null; then
@@ -119,93 +242,300 @@ if [[ -e "$PIDFILE" ]]; then
     printf "${YEL}Kill it and restart? [y/N]: ${NC}"
     read -r confirm
     if [[ "$confirm" =~ ^[Yy]$ ]]; then
-      kill "$oldpid" && rm -f "$PIDFILE"
+      kill "$oldpid"; rm -f "$PIDFILE"; sleep 1
       log_info "Old process terminated."
     else
-      log_info "Aborting."
-      exit 0
+      log_info "Aborting."; exit 0
     fi
   else
     log_info "Stale PID found. Cleaning up."
     rm -f "$PIDFILE"
   fi
 fi
+echo $$ >"$PIDFILE"
 
-# --- SET PID AND TRAP EXIT -------------------------------------------------
-echo $$ > "$PIDFILE"
-trap 'rm -f "$PIDFILE"; cleanup' EXIT
+# --- RUNTIME STATE ---------------------------------------------------------
+PIPE_PG=""
+EVFIFO="$CAPTURE_DIR/events.fifo"
+LIVE=""
+LIVE_STARTED=0
+LIVE_EPOCH=0
+RECORDING=0
+TOTAL_SEGMENTS=0
+TOTAL_MS=0
+LAST_NOTIFY=0
+MIC_SILENT_WARNED=0
+SHUTTING_DOWN=0
 
-
-# --- GRACEFUL SHUTDOWN FUNCTION --------------------------------------------
-cleanup() {
-  log_info "Cleanup: Finalizing recording session."
-  termux-microphone-record -q 2>/dev/null || true
-  termux-wake-unlock
-  termux-notification-remove --id $NOTIF_ID
-  log_info "Wakelock released and notification cleared."
-  log_info "Goodbye."
+# --- RECORDER --------------------------------------------------------------
+rec_start() {
+  local file="$1"
+  termux-microphone-record -q >/dev/null 2>&1
+  sleep 0.25
+  rm -f "$file"
+  local out
+  out=$(termux-microphone-record -e "$CAPTURE_ENC" -b "$CAPTURE_BITRATE" \
+            -r "$CAPTURE_RATE" -c 1 -f "$file" -l 0 2>&1)
+  if [[ "$out" != *"Recording started"* ]]; then
+    log_error "could not start the microphone: $out"
+    return 1
+  fi
+  RECORDING=1
+  LIVE="$file"
+  LIVE_STARTED=$(date +%s)
+  LIVE_EPOCH=$(date +%s)
+  log_info "capture started: $(basename "$file")"
+  # the encoder needs a moment before the container has audio pages in it
+  local i
+  for i in 1 2 3 4 5 6 7 8 9 10; do
+    [[ -s "$file" ]] && (( $(stat -c %s "$file") > 2000 )) && return 0
+    sleep 0.2
+  done
+  log_warn "capture file is empty after 2s - check the microphone permission"
+  return 1
 }
 
-# --- WAKELOCK & NOTIFICATION -----------------------------------------------
-termux-wake-lock
-# Optional: enable notification if desired
-# termux-notification --id $NOTIF_ID --title "DTRH-Audiophile" --content "Recording..." --ongoing
+rec_stop() {
+  (( RECORDING )) || return 0
+  termux-microphone-record -q >/dev/null 2>&1
+  sleep 0.3
+  RECORDING=0
+}
 
-# --- TRANSCRIPTION FUNCTION ------------------------------------------------
-transcribe() {
-  local base="$1"
-  local m4a="$base.m4a"
-  local wav="$base.wav"
+# --- STREAM FEEDER ---------------------------------------------------------
+# tail -f cannot be used here: ffmpeg refuses an ogg pipe that arrives through
+# it ("End of file" on open).  Reading the file ourselves and holding the pipe
+# open works and lets us follow the live container byte-exactly.
+feed_stream() {
+  local f="$1" pos=0 sz avail
+  while :; do
+    sz=$(stat -c %s "$f" 2>/dev/null) || sz=0
+    if (( sz < pos )); then pos=0; fi        # truncated / replaced
+    if (( sz > pos )); then
+      avail=$(( sz - pos ))
+      tail -c +$(( pos + 1 )) "$f" 2>/dev/null | head -c "$avail"
+      pos=$(( pos + avail ))
+    else
+      sleep 0.2
+    fi
+  done
+}
+
+# --- PIPELINE --------------------------------------------------------------
+pipeline_stop() {
+  if [[ -n "$PIPE_PG" ]]; then
+    kill -TERM -- "-$PIPE_PG" 2>/dev/null
+    sleep 0.15
+    kill -KILL -- "-$PIPE_PG" 2>/dev/null
+    PIPE_PG=""
+  fi
+  exec 7<&- 2>/dev/null || true
+  rm -f "$EVFIFO"
+}
+
+pipeline_start() {
+  local live="$1"
+  pipeline_stop
+  rm -f "$EVFIFO"
+  mkfifo -m 600 "$EVFIFO" || { log_error "cannot create $EVFIFO"; return 1; }
+  export VAD_OUTDIR="$CAPTURE_DIR/segments" VAD_TAG="seg" \
+         VAD_SPEECH_DB="$SPEECH_DB" VAD_MARGIN_DB="$MARGIN_DB" \
+         VAD_PREROLL_MS="$PREROLL_MS" VAD_ENDSIL_MS="$END_SILENCE_MS" \
+         VAD_MINSPEECH_MS="$MIN_SPEECH_MS" VAD_MAXSEG_MS="$MAX_SEGMENT_MS"
+  mkdir -p "$VAD_OUTDIR"
+  set -m   # own process group, so the whole chain can be signalled at once
+  (
+    feed_stream "$live" 2>/dev/null \
+      | ffmpeg -hide_banner -nostdin -loglevel error -f ogg -i - \
+               -vn -ac 1 -ar 16000 -f s16le - 2>>"$LOGFILE" \
+      | python3 -u "$VAD_PY" 2>>"$LOGFILE"
+  ) >"$EVFIFO" 2>>"$LOGFILE" &
+  PIPE_PG=$!
+  set +m
+  exec 7<"$EVFIFO"
+  return 0
+}
+
+rotate_capture() {
+  local old="$LIVE"
+  log_debug "rotating capture (silence housekeeping)"
+  pipeline_stop
+  rec_stop
+  [[ -n "$old" ]] && rm -f "$old"
+  rec_start "$CAPTURE_DIR/live-$(date +%H%M%S).ogg" || return 1
+  pipeline_start "$LIVE" || return 1
+}
+
+# --- TRANSCRIPTION ---------------------------------------------------------
+append_md() { # $1=wall HH:MM:SS  $2=duration  $3=text
+  local hhmmss="$1" dur="$2" text="$3"
+  local today; today=$(date +%F)
+  if [[ "$today" != "$TODAY" ]]; then
+    TODAY="$today"; DAILY_MD="$WORK/$TODAY.md"
+    log_info "rolling over to $DAILY_MD"
+  fi
+  printf '\n## %s (%ss)\n\n%s\n\n---\n' "$hhmmss" "$dur" "$text" >>"$DAILY_MD"
+  log_info ">> $hhmmss (${dur}s) $text"
+}
+
+audit_line() { # $1=wav $2=t0 $3=dur $4=db $5=peak $6=text
+  (( AUDIT )) || return 0
+  mkdir -p "$(dirname "$AUDIT_JSONL")"
+  printf '{"ts":"%s","file":"%s","t0":%s,"dur":%s,"db":%s,"peak":%s,"text":"%s"}\n' \
+    "$(date -Iseconds)" "$(basename "$1")" "$2" "$3" "$4" "$5" \
+    "$(printf '%s' "$6" | sed 's/\\/\\\\/g; s/"/\\"/g')" >>"$AUDIT_JSONL"
+}
+
+# Phrases whisper invents when it is fed something that is not speech.
+is_hallucination() {
+  local t="${1,,}"
+  t="${t//[[:punct:]]/}"
+  t="${t// /}"
+  case "$t" in
+    ""|you|thankyou|thanksforwatching|thankyouforwatching|please|subscribe|\
+    thanksforwatchingandsubscribing|subscribetomychannel|bye|okay|mhm|\
+    silencenoise|[[]blank_audio[]]|transcriptionby|amaraorg) return 0;;
+  esac
+  return 1
+}
+
+transcribe() { # $1=wav $2=stream t0 $3=dur $4=db $5=peak
+  local wav="$1" t0="$2" dur="$3" db="$4" peak="$5"
+  local base="${wav%.wav}"
   local txt="$base.txt"
+  local hhmmss
+  hhmmss=$(date -d "@$(( LIVE_EPOCH + ${t0%.*} ))" +%H:%M:%S 2>/dev/null || date +%H:%M:%S)
 
-  log_debug "Verifying audio exists: $m4a"
-  [[ -s "$m4a" ]] || { log_error "No audio file found: $m4a"; return; }
-
-  log_info "Converting to WAV: $m4a → $wav"
-  if ! ffmpeg -y -loglevel error -i "$m4a" -ar 16000 -ac 1 "$wav"; then
-    log_error "FFmpeg failed for $m4a"
-    return
+  if ! "$WHISPER" -m "$MODEL" -f "$wav" -otxt -of "$base" -l en \
+        -t "$THREADS" -np -nt >>"$LOGFILE" 2>&1; then
+    log_error "whisper failed on $(basename "$wav")"
+    rm -f "$wav" "$txt"
+    return 1
   fi
 
-  [[ -s "$wav" ]] || { log_error "Conversion produced empty WAV."; return; }
+  local text=""
+  [[ -s "$txt" ]] && text=$(tr '\n' ' ' <"$txt" | tr -s ' ' | sed 's/^ *//; s/ *$//')
 
-  log_info "Transcribing audio: $wav"
-  if ! "$HOME/whisper.cpp/build/bin/whisper-cli" \
-       -m "$MODEL" -f "$wav" -otxt -of "$base"; then
-    log_error "Transcription failed for $wav"
-    return
-  fi
-
-  if [[ -s "$txt" ]]; then
-    log_info "Appending transcription to journal: $DAILY_MD"
-    printf '\n## %s\n' "$(date '+%H:%M:%S')" >> "$DAILY_MD"
-    cat "$txt" >> "$DAILY_MD"
-    printf '\n---\n' >> "$DAILY_MD"
+  if [[ -z "$text" ]]; then
+    log_debug "no words in $(basename "$wav") - dropped"
+  elif is_hallucination "$text"; then
+    log_debug "dropped whisper artefact: \"$text\""
   else
-    log_error "Transcript empty: $txt"
+    append_md "$hhmmss" "$dur" "$text"
+    audit_line "$wav" "$t0" "$dur" "$db" "$peak" "$text"
+    TOTAL_SEGMENTS=$(( TOTAL_SEGMENTS + 1 ))
+    TOTAL_MS=$(( TOTAL_MS + ${dur%.*} * 1000 ))
   fi
-
-  log_debug "Cleaning up temporary files."
-  rm -f "$m4a" "$wav" "$txt"
+  rm -f "$wav" "$txt"
 }
 
-# --- MAIN LOOP -------------------------------------------------------------
-log_info "Recording started. Slice interval: ${INTERVAL}s"
+maybe_notify() {
+  (( NOTIFY )) || return 0
+  local now; now=$(date +%s)
+  (( now - LAST_NOTIFY < 60 )) && return 0
+  LAST_NOTIFY=$now
+  local content
+  if [[ "$(kv_state)" == "speech" ]]; then
+    content="listening... ${TOTAL_SEGMENTS} utterances today"
+  else
+    content="idle - ${TOTAL_SEGMENTS} utterances today"
+  fi
+  termux-notification --id "$NOTIF_ID" --title "DTRH-Audiophile" \
+    --content "$content" --ongoing --priority low >/dev/null 2>&1
+}
 
-while true; do
-  ts=$(date +%Y%m%d_%H%M%S)
-  base="$WORK/segment_${ts}"
+kv_state() { echo "${CUR_STATE:-idle}"; }
 
-  log_debug "Starting new recording slice: $base.m4a"
-  termux-microphone-record -f "$base.m4a" -l 0 &
-  rec_pid=$!
+# --- EVENT HANDLING --------------------------------------------------------
+handle_event() {
+  local line="$1" ev
+  ev=$(kv_get ev "$line") || return 0
+  case "$ev" in
+    ready)
+      log_info "vad ready (speech>$(kv_get thr "$line")dB, floor $(kv_get floor "$line")dB)"
+      CUR_STATE=idle;;
+    level)
+      CUR_STATE=$(kv_get state "$line")
+      local db; db=$(kv_get db "$line")
+      log_debug "level db=$db floor=$(kv_get floor "$line") thr=$(kv_get thr "$line") state=$CUR_STATE buffered=$(kv_get buf "$line")s"
+      if [[ "$db" == "-91.0" ]] && (( MIC_SILENT_WARNED == 0 )); then
+        MIC_SILENT_WARNED=1
+        log_warn "microphone is returning digital silence - open Termux once and grant the microphone permission"
+      elif [[ "$db" != "-91.0" ]]; then
+        MIC_SILENT_WARNED=1
+      fi
+      maybe_notify;;
+    begin)
+      log_debug "speech onset at $(kv_get t "$line")s";;
+    segment)
+      local file t0 dur db peak reason
+      file=$(kv_get file "$line"); t0=$(kv_get t0 "$line")
+      dur=$(kv_get dur "$line");  db=$(kv_get db "$line")
+      peak=$(kv_get peak "$line"); reason=$(kv_get reason "$line")
+      log_info "utterance ${dur}s (voiced $(kv_get voiced "$line")s, ${db}dB, ${reason}) -> whisper"
+      transcribe "$file" "$t0" "$dur" "$db" "$peak";;
+    drop)
+      log_debug "dropped $(kv_get dur "$line")s of audio: $(kv_get reason "$line")";;
+    idle)
+      local secs; secs=$(kv_get seconds "$line")
+      local age=$(( $(date +%s) - LIVE_STARTED ))
+      local size_kb=$(( $(stat -c %s "$LIVE" 2>/dev/null || echo 0) / 1024 ))
+      if (( secs >= ROTATE_IDLE_S && age >= ROTATE_MIN_AGE_S )); then
+        log_info "no speech for ${secs}s - recycling the capture file"
+        rotate_capture || log_error "rotation failed"
+      elif (( size_kb > ROTATE_MAX_MB * 1024 )); then
+        log_warn "capture file reached ${size_kb}kB - recycling"
+        rotate_capture || log_error "rotation failed"
+      fi;;
+    error)
+      log_error "vad error: $(kv_get msg "$line")";;
+    end)
+      log_warn "vad pipeline finished (segments=$(kv_get segments "$line"))";;
+    *) :;;
+  esac
+}
 
-  sleep "$INTERVAL"
+# --- CLEANUP ---------------------------------------------------------------
+cleanup() {
+  (( SHUTTING_DOWN )) && return 0
+  SHUTTING_DOWN=1
+  trap - EXIT INT TERM HUP
+  log_info "cleanup: stopping capture and transcriber"
+  pipeline_stop
+  rec_stop
+  [[ -n "$LIVE" ]] && rm -f "$LIVE"
+  rm -rf "${CAPTURE_DIR:?}/segments" 2>/dev/null || true
+  termux-notification-remove --id "$NOTIF_ID" >/dev/null 2>&1 || true
+  termux-wake-unlock >/dev/null 2>&1 || true
+  rm -f "$PIDFILE"
+  log_info "utterances this run: $TOTAL_SEGMENTS (${TOTAL_MS}ms of speech) - goodbye."
+}
+trap cleanup EXIT INT TERM HUP
 
-  log_debug "Stopping recording process (PID: $rec_pid)"
-  termux-microphone-record -q
-  wait "$rec_pid"
+# --- RUN -------------------------------------------------------------------
+termux-wake-lock >/dev/null 2>&1 || true
+log_info "starting: silence-gated transcription (preroll ${PREROLL_MS}ms, end-silence ${END_SILENCE_MS}ms)"
 
-  log_debug "Launching transcription for $base"
-  transcribe "$base" &
+while (( SHUTTING_DOWN == 0 )); do
+  if ! rec_start "$CAPTURE_DIR/live-$(date +%H%M%S).ogg"; then
+    log_error "capture could not be started - retrying in 5s"
+    sleep 5; continue
+  fi
+  if ! pipeline_start "$LIVE"; then
+    log_error "pipeline could not be started - retrying in 5s"
+    rec_stop; sleep 5; continue
+  fi
+
+  while IFS= read -r line <&7; do
+    handle_event "$line"
+  done
+
+  # outer loop restart: either the chain died or someone rotated the capture
+  if (( SHUTTING_DOWN == 0 )); then
+    log_warn "pipeline stream ended - restarting with a fresh capture file"
+    pipeline_stop
+    rec_stop
+    rm -f "$LIVE"
+    sleep 0.5
+  fi
 done
