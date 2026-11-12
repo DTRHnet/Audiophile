@@ -214,6 +214,36 @@ captured and transcribed:
   regardless of VAD state, each followed by a fresh capture file and a healthy
   `vad ready`, with a clean stop afterwards (no strays, capture dir empty).
 
+**Quiet room (the case that was previously untestable).** Re-run with the
+room silent, `DTRH_ROTATE_IDLE_S=20`, `DTRH_ROTATE_MIN_AGE_S=15`, 55 s window:
+
+```
+QUIET-ROOM IDLE CPU: 5.7% of one core over 55s
+idle events reached bash : 3
+rotations (idle path)    : 1
+capture-starts           : 2
+utterances detected      : 0      <- correct
+whisper invocations      : 0      <- correct
+transcripts written      : 0
+
+[DEBUG] idle 15s (capture age 23s, 83kB; rotate at 20s idle / 15s age)   <- correctly below threshold
+[DEBUG] idle 30s (capture age 38s, 131kB; rotate at 20s idle / 15s age)  <- trips it
+[INFO]  no speech for 30s - recycling the capture file
+[INFO]  vad ready
+```
+
+That closes the one path that had only been forced rather than observed. A
+silent minute now costs 5.7 % of one core and produces no whisper call at all.
+
+**Threshold reading for this room** (60 level events during that silent
+minute): min −85.0, median −82.7, p90 −72.2, **max −54.4 dB**, floor settled
+between −85.5 and −70.0. Two of 60 blocks crossed the default −55 dB
+threshold but never two in a row, so no utterance was created — that is the
+hysteresis doing its job, but it has little margin. For this phone in this
+room `DTRH_SPEECH_DB=-60` is the safer setting: it keeps ~12 dB of headroom
+over the 90th-percentile noise and still sits far below real speech
+(−32…−47 dB measured).
+
 **Graceful stop.** `--stop` → `cleanup: stopping capture and transcriber`,
 pidfile removed, recorder released, capture file deleted, zero surviving
 processes (`audiophile-vad.py`, `audiophile-follow.py`, ffmpeg).
@@ -268,7 +298,8 @@ Each of these was found by running it, not by reading it.
 ## 7. Limits, and what is still untested
 
 * Multi-hour stability, thermal behaviour and true battery drain are not
-  measured — only a 45–60 s idle window and a ~2 minute soak.
+  measured — only 45–60 s idle windows and ~2 minute soaks (device reported
+  40 % battery, 28.6 °C throughout, which says nothing about an overnight run).
 * `tiny.en` accuracy vs `base.en` on this microphone is not compared. tiny.en
   already mis-hears one word in ten ("audiophile" → "audio file") and drops
   final clauses of quiet sentences.
