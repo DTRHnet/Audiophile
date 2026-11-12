@@ -192,6 +192,28 @@ This synthesises a track with two tones separated by silence and asserts that
 exactly two utterances come out of the VAD. It exercises the whole state
 machine without needing speech or a microphone.
 
+### Installing and updating on the phone
+
+The phone copy is a normal git clone, so updating is a pull:
+
+```bash
+cd ~/Audiophile
+git pull
+chmod +x *.sh *.py
+./DTRH-Audiophile.sh --selftest
+```
+
+`DTRH-Session.sh` starts the transcriber with a live log pane beside it in tmux
+(detach with `Ctrl+b d`, kill the whole thing with `Ctrl+C` in the left pane):
+
+```bash
+./DTRH-Session.sh
+```
+
+A failed change is worth catching before it costs you a day of audio; the
+commands that prove the pipeline still works are listed in
+`docs/JOURNAL.md` §9 "Verification checklist".
+
 ## 5. Advanced
 
 ### 5a. Termux-API + Termux-Tasker + Tasker Integration
@@ -265,8 +287,10 @@ machine without needing speech or a microphone.
 ## 7. Design notes
 
 `docs/JOURNAL.md` records the measurements behind every decision (recorder
-timing, container streamability, dB levels, whisper latency) and the two
-approaches that were measured and rejected.
+timing, container streamability, dB levels, whisper latency, idle CPU), the
+approaches that were measured and rejected, the defects found during bring-up,
+the honest limits of the current design, and a §9 verification checklist to
+re-run after any change.
 
 ## 8. License
 
