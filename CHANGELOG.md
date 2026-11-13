@@ -13,6 +13,40 @@ in [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
 Nothing yet — see the roadmap for what is queued.
 
+## [3.2.0] — 2026-11-12
+
+Transcription stops blocking the listener, and the model can stay resident.
+
+### Added
+
+* **Asynchronous transcription queue** (`DTRH_ASYNC`, default on). Utterances
+  are written to a queue and a worker transcribes them serially, so the VAD
+  event loop keeps handling levels, rotation and notifications instead of
+  waiting on whisper. Journal order is preserved because exactly one worker
+  writes. Verified: two utterances in, two out, in order, with no stray
+  processes after shutdown.
+* **Optional resident model** (`DTRH_ENGINE=server`, `DTRH_SERVER_PORT=8087`).
+  Starts `whisper-server` on loopback, health-checks it, and falls back to
+  `whisper-cli` if it will not answer. Measured on a 20.5 s clip:
+  cli 2701/2687/2680 ms vs server 2352/2287/2258 ms — **~390 ms saved per
+  utterance**, and one fewer process spawn.
+* `DTRH_ASYNC`, `DTRH_ENGINE`, `DTRH_SERVER_PORT` in the settings banner and
+  the README table.
+
+### Fixed
+
+* Whisper's own chatter (`read_audio_data: …`, `output_txt: saving…`) no longer
+  floods `DTRH-Audiophile.log`; the transcript still comes from the `.txt` file,
+  and server mode parses the HTTP response instead.
+* Non-speech annotations attached to real speech are stripped instead of
+  journalled: `"[typing] First few words"` → `"First few words"`, `"Hello
+  (laughs)"` → `"Hello"`. Text that is *only* an annotation is still dropped.
+* `audiophile-pocket-calibrate.sh` could leave the media volume low: its
+  `PREV_VOL` sed was greedy and captured the *last* stream's volume in the JSON
+  rather than music's. It now matches the music entry explicitly and never
+  lowers the stream. (Found because TTS-based test clips started transcribing
+  as silence.)
+
 ## [3.1.0] — 2026-11-12
 
 A second, semantic gate in front of whisper, plus the measurements needed to

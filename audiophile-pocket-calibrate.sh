@@ -69,8 +69,9 @@ cue_done() {    # buzz 3
 
 # raise the media volume so the cue can be heard through a pocket, then restore
 volume_up() {
-  PREV_VOL="$(termux-volume 2>/dev/null | tr -d ' \n' | sed -n 's/.*"stream":"music".*"volume":\([0-9]*\).*/\1/p')"
-  termux-volume music 12 >/dev/null 2>&1 || true
+  PREV_VOL="$(termux-volume 2>/dev/null | tr -d ' \n' | sed -n 's/.*"stream":"music","volume":\([0-9]*\).*/\1/p')"
+  # only ever raise, never drop the stream this low: a silent cue is worse than none
+  if [[ -z "${PREV_VOL:-}" ]] || (( PREV_VOL < 12 )); then termux-volume music 12 >/dev/null 2>&1 || true; fi
 }
 volume_restore() {
   [[ -n "${PREV_VOL:-}" ]] && termux-volume music "$PREV_VOL" >/dev/null 2>&1 || true

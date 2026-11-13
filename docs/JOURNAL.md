@@ -358,6 +358,27 @@ change can recover speech that is not there. Pocket support is therefore parked:
 `audiophile-pocket-calibrate.sh` remains, and its `RUN INVALID` / `UNUSABLE`
 verdicts are the honest answer for that placement.
 
+**Engine and queue (3.2.0).** Transcription now runs behind a queue worker, so
+the VAD loop keeps working while whisper is busy; two TTS utterances went in and
+came out in order, with zero stray processes afterwards. Whisper's own chatter
+no longer appears in the log (`grep -c read_audio_data` → 0).
+
+A resident model is available and was measured on a 20.5 s clip:
+
+| engine | run 1 | run 2 | run 3 |
+| --- | --- | --- | --- |
+| `whisper-cli` (model reloaded each call) | 2701 ms | 2687 ms | 2680 ms |
+| `whisper-server` (resident) | 2352 ms | 2287 ms | 2258 ms |
+
+~390 ms per utterance, so it stays opt-in (`DTRH_ENGINE=server`) rather than
+default: it adds a process, a port and a lifecycle to save a tenth of a call.
+
+Two small defects surfaced while testing this: whisper prefixed real speech with
+its description of the background (`"[typing] First few words…"`), now stripped;
+and the pocket tool's volume restore used a greedy `sed` that captured the wrong
+stream's volume, which is why TTS-based clips briefly began transcribing as
+silence.
+
 ## 6. What the testing broke, and what was fixed
 
 Each of these was found by running it, not by reading it.

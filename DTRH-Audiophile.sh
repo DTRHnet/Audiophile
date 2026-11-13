@@ -3,7 +3,7 @@
 # ::
 # :: DTRH-Audiophile.sh
 # ::   A real-time audio to text logger for Termux (Android)
-# ::   Version: 3.1.0
+# ::   Version: 3.2.0
 # ::
 # ::   Author: KBS - DTRH.net
 # :: --------------------------------------------------------------------
@@ -37,7 +37,7 @@ cat <<'EOF'
 
 ------------------------[ DTRH.NET ]-------------------------
  admin[AT]dtrh[DOT]net                            May 05,2025
- KBS                              silence gating: v3.1.0
+ KBS                              silence gating: v3.2.0
 . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
 
 EOF
@@ -81,6 +81,14 @@ THREADS="${DTRH_THREADS:-4}"
 # "(dramatic music)"/"(beeping)" in ~3.5s, while real speech is untouched.
 WHISPER_VAD="${DTRH_WHISPER_VAD:-auto}"       # auto | off | path/to/silero.bin
 WHISPER_VAD_THR="${DTRH_WHISPER_VAD_THRESHOLD:-0.5}"
+# cli    : one whisper-cli process per utterance (loads the model every time)
+# server : whisper-server resident on 127.0.0.1, model loaded once (measured
+#          ~390ms less per utterance on this device; falls back to cli)
+ENGINE="${DTRH_ENGINE:-cli}"
+SERVER_PORT="${DTRH_SERVER_PORT:-8087}"
+# 1 = transcribe in a worker fed by a queue, so the VAD event loop (levels,
+# rotation, notifications) never blocks behind whisper
+ASYNC="${DTRH_ASYNC:-1}"
 NOTIFY="${DTRH_NOTIFY:-1}"
 AUDIT="${DTRH_AUDIT:-1}"
 NOTIF_ID=1
@@ -137,6 +145,7 @@ show_settings() {
   printf "${YEL}%-22s${NC}: %-40s\n" "Rotate after"   "${ROTATE_IDLE_S}s of silence"
   printf "${YEL}%-22s${NC}: %-40s\n" "Whisper threads" "$THREADS"
   printf "${YEL}%-22s${NC}: %-40s\n" "Whisper VAD"     "$WHISPER_VAD (threshold ${WHISPER_VAD_THR})"
+  printf "${YEL}%-22s${NC}: %-40s\n" "Engine / queue"  "${ENGINE} / async=$([ "$ASYNC" = 1 ] && echo on || echo off)"
   printf "${YEL}%-22s${NC}: %-40s\n" "Notifications"  "$([ "$NOTIFY" = 1 ] && echo on || echo off)"
   printf "${YEL}%-22s${NC}: %s\n" "Log File"        "$(shorten_path "$LOGFILE")"
   printf "${YEL}%-22s${NC}: %s\n" "Script PID"      "$$"
@@ -295,6 +304,10 @@ TOTAL_SEGMENTS=0
 TOTAL_MS=0
 LAST_NOTIFY=0
 MIC_SILENT_WARNED=0
+QUEUE_FIFO=""
+WORKER_PID=""
+SERVER_PID=""
+JOBS_QUEUED=0
 LEVEL_TICKS=0
 QUIET_DROPS=0
 QUIET_ADVISED=0
@@ -401,6 +414,89 @@ rotate_capture() {
   pipeline_start "$LIVE" || return 1
 }
 
+# --- TRANSCRIBE QUEUE (keeps the VAD loop responsive) ----------------------
+trap '' PIPE    # a dead worker must not kill the orchestrator mid-write
+
+queue_start() {
+  (( ASYNC )) || return 0
+  QUEUE_FIFO="$CAPTURE_DIR/queue.fifo"
+  rm -f "$QUEUE_FIFO"
+  mkfifo -m 600 "$QUEUE_FIFO" || { ASYNC=0; log_warn "cannot create queue; transcribing inline"; return 0; }
+  ( transcribe_worker ) &
+  WORKER_PID=$!
+  exec 6>"$QUEUE_FIFO"     # unblocks once the worker opens the read end
+  log_debug "transcription worker pid $WORKER_PID (async)"
+  return 0
+}
+
+transcribe_worker() {
+  exec 8<"$QUEUE_FIFO"
+  while IFS=$'\t' read -r file hhmmss dur db peak; do
+    [[ -n "$file" ]] || continue
+    transcribe "$file" "$hhmmss" "$dur" "$db" "$peak"
+  done
+  exec 8<&-
+}
+
+queue_stop() {
+  (( ASYNC )) || return 0
+  exec 6>&- 2>/dev/null || true
+  if [[ -n "$WORKER_PID" ]]; then
+    local i
+    for i in $(seq 1 60); do
+      kill -0 "$WORKER_PID" 2>/dev/null || break
+      sleep 0.25
+    done
+    kill "$WORKER_PID" 2>/dev/null
+    WORKER_PID=""
+  fi
+  rm -f "$QUEUE_FIFO"
+  return 0
+}
+
+enqueue_segment() {  # file hhmmss dur db peak
+  (( JOBS_QUEUED++ ))
+  if (( ASYNC )) && [[ -n "$WORKER_PID" ]] && kill -0 "$WORKER_PID" 2>/dev/null; then
+    printf '%s\t%s\t%s\t%s\t%s\n' "$@" >&6 2>/dev/null && return 0
+    log_warn "queue write failed - transcribing inline"
+  elif (( ASYNC )); then
+    log_warn "worker gone - transcribing inline"
+  fi
+  transcribe "$@"
+}
+
+# --- OPTIONAL RESIDENT MODEL ----------------------------------------------
+server_start() {
+  [[ "$ENGINE" == "server" ]] || return 0
+  local srv; srv="$(dirname "$WHISPER")/whisper-server"
+  if [[ ! -x "$srv" ]]; then
+    log_warn "whisper-server not found next to whisper-cli - using cli"; ENGINE=cli; return 0
+  fi
+  "$srv" -m "$MODEL" --host 127.0.0.1 --port "$SERVER_PORT" -t "$THREADS" \
+      >/dev/null 2>&1 &
+  SERVER_PID=$!
+  local i
+  for i in $(seq 1 40); do
+    curl -s --max-time 1 -o /dev/null "http://127.0.0.1:$SERVER_PORT/" 2>/dev/null && {
+      log_info "whisper-server resident on 127.0.0.1:$SERVER_PORT (pid $SERVER_PID)"
+      return 0
+    }
+    if ! kill -0 "$SERVER_PID" 2>/dev/null; then
+      log_warn "whisper-server failed to start - using cli"; ENGINE=cli; SERVER_PID=""; return 0
+    fi
+    sleep 0.5
+  done
+  log_warn "whisper-server did not answer - using cli"; ENGINE=cli
+  kill "$SERVER_PID" 2>/dev/null; SERVER_PID=""
+  return 0
+}
+
+server_stop() {
+  [[ -n "$SERVER_PID" ]] && kill "$SERVER_PID" 2>/dev/null
+  SERVER_PID=""
+  return 0
+}
+
 # --- TRANSCRIPTION ---------------------------------------------------------
 append_md() { # $1=wall HH:MM:SS  $2=duration  $3=text
   local hhmmss="$1" dur="$2" text="$3"
@@ -445,24 +541,47 @@ is_hallucination() {
   return 1
 }
 
-transcribe() { # $1=wav $2=stream t0 $3=dur $4=db $5=peak
-  local wav="$1" t0="$2" dur="$3" db="$4" peak="$5"
+transcribe() { # $1=wav $2=wall HH:MM:SS $3=dur $4=db $5=peak
+  local wav="$1" hhmmss="$2" dur="$3" db="$4" peak="$5"
   local base="${wav%.wav}"
   local txt="$base.txt"
-  local hhmmss
-  hhmmss=$(date -d "@$(( LIVE_EPOCH + ${t0%.*} ))" +%H:%M:%S 2>/dev/null || date +%H:%M:%S)
 
   local vad_args=()
   [[ -n "$WHISPER_VAD_FILE" ]] && vad_args=(--vad -vm "$WHISPER_VAD_FILE" -vt "$WHISPER_VAD_THR")
-  if ! "$WHISPER" -m "$MODEL" -f "$wav" -otxt -of "$base" -l en \
-        -t "$THREADS" -np -nt "${vad_args[@]}" >>"$LOGFILE" 2>&1; then
-    log_error "whisper failed on $(basename "$wav")"
-    rm -f "$wav" "$txt"
-    return 1
+
+  if [[ "$ENGINE" == "server" && -n "$SERVER_PID" ]]; then
+    # resident model, one HTTP call; whisper's chatter never reaches our log
+    local resp
+    resp=$(curl -s --max-time 300 \
+      -F "file=@$wav" -F "response_format=json" \
+      "http://127.0.0.1:$SERVER_PORT/inference" 2>/dev/null)
+    if [[ -z "$resp" ]]; then
+      log_warn "whisper-server gave no answer - falling back to cli for this one"
+      ENGINE=cli
+    else
+      printf '%s' "$resp" \
+        | sed -n 's/.*"text"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
+        | sed 's/\\n/ /g; s/\\"/"/g' >"$txt"
+    fi
+  fi
+  if [[ ! -s "$txt" ]]; then
+    if ! "$WHISPER" -m "$MODEL" -f "$wav" -otxt -of "$base" -l en \
+          -t "$THREADS" -np -nt "${vad_args[@]}" >/dev/null 2>&1; then
+      log_error "whisper failed on $(basename "$wav")"
+      rm -f "$wav" "$txt"
+      return 1
+    fi
   fi
 
   local text=""
   [[ -s "$txt" ]] && text=$(tr '\n' ' ' <"$txt" | tr -s ' ' | sed 's/^ *//; s/ *$//')
+  # whisper prefixes real speech with its own description of the background,
+  # e.g. "[typing] First few words". Drop those annotations, keep the words.
+  if [[ -n "$text" ]]; then
+    text=$(printf '%s' "$text" | sed -E 's/^[[:space:]]*(\[[^]]*\]|\([^)]*\))[[:space:]]*//')
+    text=$(printf '%s' "$text" | sed -E 's/[[:space:]]*(\[[^]]*\]|\([^)]*\))[[:space:]]*$//')
+    text=$(printf '%s' "$text" | sed 's/^ *//; s/ *$//')
+  fi
 
   if [[ -z "$text" ]]; then
     log_debug "no words in $(basename "$wav") - dropped"
@@ -521,8 +640,10 @@ handle_event() {
       file=$(kv_get file "$line"); t0=$(kv_get t0 "$line")
       dur=$(kv_get dur "$line");  db=$(kv_get db "$line")
       peak=$(kv_get peak "$line"); reason=$(kv_get reason "$line")
-      log_info "utterance ${dur}s (voiced $(kv_get voiced "$line")s, ${db}dB, ${reason}) -> whisper"
-      transcribe "$file" "$t0" "$dur" "$db" "$peak";;
+      log_info "utterance ${dur}s (voiced $(kv_get voiced "$line")s, ${db}dB, ${reason}) -> queue"
+      local hhmmss
+      hhmmss=$(date -d "@$(( LIVE_EPOCH + ${t0%.*} ))" +%H:%M:%S 2>/dev/null || date +%H:%M:%S)
+      enqueue_segment "$file" "$hhmmss" "$dur" "$db" "$peak";;
     drop)
       local reason; reason=$(kv_get reason "$line")
       log_debug "dropped $(kv_get dur "$line")s of audio: ${reason} (voiced $(kv_get voiced_ms "$line")ms, $(kv_get vdb "$line")dB)"
@@ -553,6 +674,9 @@ handle_event() {
   esac
 }
 
+server_start
+queue_start
+
 # --- CLEANUP ---------------------------------------------------------------
 cleanup() {
   (( SHUTTING_DOWN )) && return 0
@@ -561,6 +685,8 @@ cleanup() {
   log_info "cleanup: stopping capture and transcriber"
   pipeline_stop
   rec_stop
+  queue_stop
+  server_stop
   [[ -n "$LIVE" ]] && rm -f "$LIVE"
   rm -rf "${CAPTURE_DIR:?}/segments" 2>/dev/null || true
   termux-notification-remove --id "$NOTIF_ID" >/dev/null 2>&1 || true

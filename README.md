@@ -176,6 +176,9 @@ Everything is overridable from the environment, no editing required:
 | `DTRH_THREADS` | `4` | whisper threads |
 | `DTRH_WHISPER_VAD` | `auto` | whisper's Silero VAD: `auto`, `off`, or a model path |
 | `DTRH_WHISPER_VAD_THRESHOLD` | `0.5` | Silero speech probability threshold |
+| `DTRH_ASYNC` | `1` | transcribe in a worker so the listener never blocks |
+| `DTRH_ENGINE` | `cli` | `cli`, or `server` to keep the model resident |
+| `DTRH_SERVER_PORT` | `8087` | loopback port for `DTRH_ENGINE=server` |
 | `DTRH_WORK` | `~/storage/shared/Obsidian/transcripts` | output directory |
 | `DTRH_MODEL` | `~/whisper.cpp/models/ggml-tiny.en.bin` | model |
 | `DTRH_NOTIFY` | `1` | live notification |

@@ -24,19 +24,13 @@ Three rules the code follows, which later work must not break:
 
 ## Next
 
-### 1. Move transcription off the event loop, behind a resident model
+### 1. ~~Move transcription off the event loop, behind a resident model~~ — done in 3.2.0
 
-*Why:* each utterance currently pays ~1 s of `whisper-cli` model loading out of
-a ~4.1 s call, and transcription is synchronous — a 120 s monologue makes the
-journal lag by ~48 s while the VAD keeps queueing. `whisper-server` is already
-built in `~/whisper.cpp/build/bin/` and can hold the model resident.
-
-*Plan:* a queue worker fed by the event loop (journal order preserved), talking
-either to `whisper-server` over HTTP or to a persistent `whisper-cli`-equivalent
-process. Success = per-utterance latency below 2 s for a 5 s utterance, and a
-measured drop in CPU per transcribed second.
-
-*Also unlocks:* `base.en` (~2× the compute, see the A/B) becomes affordable.
+Shipped: a queue worker transcribes serially (order preserved) so the event
+loop never blocks, plus an opt-in resident `whisper-server` that saves ~390 ms
+per utterance. Still open: whether `DTRH_ENGINE=server` should become the
+default once it has survived a long run, and whether the saved time makes
+`base.en` viable (it is ~2× the compute; see the A/B in the journal).
 
 ### 2. SD card for models and capture files
 
