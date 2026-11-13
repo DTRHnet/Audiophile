@@ -33,8 +33,48 @@ SILERO="${DTRH_WHISPER_VAD:-auto}"
 WORK="$TMPD/pocket-calib"
 REPORT="$WORK/report.txt"
 SENTENCE="The audiophile pipeline records audio at sixteen kilohertz and writes markdown notes."
+CUE="${DTRH_CUE:-buzz}"   # buzz | beep | both - how the phase boundaries are signalled
 
 buzz() { termux-vibrate -d "${1:-250}" >/dev/null 2>&1 || true; }
+
+# A buzz alone is easy to miss through a pocket while walking, so cue with an
+# audible beep as well. The beep lands in the recording, which is why it is
+# short and why the phase boundaries are placed after it.
+make_beep() {
+  [[ -s "$WORK/beep.wav" ]] && return 0
+  ffmpeg -hide_banner -loglevel error -y \
+    -f lavfi -i "sine=frequency=1000:duration=0.35" -af "volume=0.7" \
+    -ar 22050 -ac 1 "$WORK/beep.wav" 2>/dev/null || return 1
+}
+beep() {
+  local n="${1:-1}"
+  make_beep || return 0
+  while (( n-- > 0 )); do
+    termux-media-player play "$WORK/beep.wav" >/dev/null 2>&1 || true
+    sleep 0.55
+  done
+}
+cue_start() {   # buzz 1
+  [[ "$CUE" == beep || "$CUE" == both ]] && beep 1
+  buzz 500
+}
+cue_talk() {    # buzz 2
+  [[ "$CUE" == beep || "$CUE" == both ]] && beep 3
+  buzz 500
+}
+cue_done() {    # buzz 3
+  [[ "$CUE" == beep || "$CUE" == both ]] && beep 1
+  buzz 150; sleep 0.12; buzz 150; sleep 0.12; buzz 400
+}
+
+# raise the media volume so the cue can be heard through a pocket, then restore
+volume_up() {
+  PREV_VOL="$(termux-volume 2>/dev/null | tr -d ' \n' | sed -n 's/.*"stream":"music".*"volume":\([0-9]*\).*/\1/p')"
+  termux-volume music 12 >/dev/null 2>&1 || true
+}
+volume_restore() {
+  [[ -n "${PREV_VOL:-}" ]] && termux-volume music "$PREV_VOL" >/dev/null 2>&1 || true
+}
 have() { command -v "$1" >/dev/null 2>&1; }
 
 usage() {
@@ -125,16 +165,19 @@ record_phases() {
   termux-microphone-record -q >/dev/null 2>&1; sleep 0.3
   rm -f "$raw"
   termux-microphone-record -e opus -b 32 -r 16000 -c 1 -f "$raw" -l 0 >/dev/null 2>&1
+  make_beep; volume_up
   echo "recording... PHASE A: keep quiet in your pocket (${quiet_s}s) - do not talk"
-  buzz 200
+  echo "   cue: buzz 1 = start"
+  cue_start
   sleep "$quiet_s"
   echo "PHASE B: talk now, normally, for ${talk_s}s - say this:"
   echo "   \"$SENTENCE\""
-  buzz 120; sleep 0.15; buzz 120
+  echo "   cue: buzz 2 = talk now"
+  cue_talk
   sleep "$talk_s"
   termux-microphone-record -q >/dev/null 2>&1
   sleep 0.6
-  buzz 90; sleep 0.1; buzz 90; sleep 0.1; buzz 300
+  cue_done; volume_restore
   local total; total=$(ffprobe -v error -show_entries format=duration -of csv=p=0 "$raw" 2>/dev/null)
   echo "done (${total}s recorded)"
   ffmpeg -hide_banner -loglevel error -y -f ogg -i "$raw" -ar 16000 -ac 1 "$WORK/quiet.wav"
@@ -158,8 +201,16 @@ speech_check() {
   echo "whisper (with silero if available) on the talking phase:"
   "$WHISPER" -m "$MODEL" -f "$wav" -otxt -of "$WORK/talk" -l en -t 4 -np -nt "${flags[@]}" >/dev/null 2>&1
   local text; text=$(tr '\n' ' ' <"$WORK/talk.txt" 2>/dev/null | sed 's/^ *//; s/ *$//')
-  if [[ -z "$text" ]]; then
-    echo "   -> NOTHING. Either nobody spoke, or the pocket swallowed the speech."
+  # Words, or only whisper's description of a noise? "(whooshing)" and
+  # "[BLANK_AUDIO]" are not speech, and must not count as a successful capture.
+  if [[ "$text" =~ ^[[:space:]]*(\(.*\)|\[.*\])[[:space:]]*$ ]]; then
+    SPEECH_TEXT=""
+    echo "   -> only a non-speech annotation ($text) - no words in the talking phase."
+  else
+    SPEECH_TEXT="$text"
+  fi
+  if [[ -z "$SPEECH_TEXT" || "$SPEECH_TEXT" == *BLANK_AUDIO* ]]; then
+    echo "   -> NO SPEECH FOUND in the talking phase."
   else
     echo "   -> \"$text\""
     echo "   ground truth: \"$SENTENCE\""
@@ -181,11 +232,22 @@ if [[ "$1" == "--analyse" ]]; then
 fi
 
 record_phases "$1" "$2"
-{
-  echo "== pocket calibration $(date '+%F %T') =="
-  analyse_py "$WORK/quiet.wav" "$WORK/talk.wav"
-} | tee "$REPORT"
+echo "== pocket calibration $(date '+%F %T') =="
+{ analyse_py "$WORK/quiet.wav" "$WORK/talk.wav"; } | tee "$REPORT"
 echo
 speech_check "$WORK/talk.wav" | tee -a "$REPORT"
+echo
+if [[ -z "${SPEECH_TEXT:-}" || "${SPEECH_TEXT}" == *BLANK_AUDIO* ]]; then
+  cat <<'MSG'
+RUN INVALID - this is not a verdict about the pocket.
+No speech was found in the talking phase, so the comparison above is
+meaningless. It usually means the "talk now" cue was missed (three beeps plus
+three buzzes) or the phase A recording was not actually quiet.
+Redo it with the phone already in the pocket before the run starts, stay still
+during phase A, and talk as soon as the three beeps land.
+MSG
+  echo "report: $REPORT"
+  exit 3
+fi
 echo "report: $REPORT"
 echo "raw audio kept at: $WORK/pocket.ogg (delete when done)"

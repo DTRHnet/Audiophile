@@ -328,6 +328,36 @@ compares high percentiles (speech p90 vs noise p95), reports threshold coverage,
 and states the effective threshold the script will actually use
 (`max(DTRH_SPEECH_DB, floor + margin)`).
 
+**Human voice, phone on a table (the case that matters).** A 30 s run with real
+speech instead of TTS:
+
+```
+## 19:49:42 (17.00s)
+6, 7, 8, 9, and 11, 12, ... 19, 20. Still probably a five seconds left just
+talking. No big deal.
+```
+
+* one utterance of 17.0 s, not split at the speaker's pauses — the end-silence
+  window did its job
+* voice level −47 dB (voiced blocks), peak −26.3 dB, room floor −85.4 dB: about
+  25 dB of margin over the −55 dB threshold, which is why TTS-based tests and
+  human speech both work
+* 1 blip gated before whisper, 1 transcript written, audit line at
+  `db=-47.1 peak=-26.3`
+* clean shutdown: pidfile removed, zero surviving processes
+
+**Tested negative: a phone in a pocket does not record words.** Four runs, two
+of them with the "talk now" cue confirmed by `dumpsys vibrator`, produced
+recordings where the *quiet* phase and the *talking* phase were
+indistinguishable in level (both ~−30 dB) and whisper returned
+`(whooshing)`, `(water splashing)`, `[BLANK_AUDIO]` — **including with Silero
+disabled and at threshold 0.15**, so it is not a gating problem: there are no
+words in the audio. The signature is fabric against the microphone port
+(a loud broadband masking noise) rather than a tuning error, and no threshold
+change can recover speech that is not there. Pocket support is therefore parked:
+`audiophile-pocket-calibrate.sh` remains, and its `RUN INVALID` / `UNUSABLE`
+verdicts are the honest answer for that placement.
+
 ## 6. What the testing broke, and what was fixed
 
 Each of these was found by running it, not by reading it.
