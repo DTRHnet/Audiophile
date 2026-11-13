@@ -13,6 +13,22 @@ in [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
 Nothing yet — see the roadmap for what is queued.
 
+## [3.2.1] — 2026-11-12
+
+A one-line bug that made the new queue a no-op in real use — found by a real
+20-minute recording, not by the unit test.
+
+### Fixed
+
+* **The queue worker exited immediately.** `transcribe_worker` opened the queue
+  on file descriptor 8 but the `read` had no `-u 8`, so bash read **stdin** —
+  which is at EOF under `nohup` — and the worker fell straight out of its loop.
+  Every utterance then took the inline fallback path (88 times in a 20-minute
+  run, logged as `worker gone - transcribing inline`). Behaviour stayed correct
+  because the fallback is real, but the asynchronous design was never exercised.
+  Now `read -r -u 8`; verified 3 utterances queued, 3 received by the worker,
+  **0 fallbacks**, single worker, clean exit at shutdown.
+
 ## [3.2.0] — 2026-11-12
 
 Transcription stops blocking the listener, and the model can stay resident.

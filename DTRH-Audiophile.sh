@@ -3,7 +3,7 @@
 # ::
 # :: DTRH-Audiophile.sh
 # ::   A real-time audio to text logger for Termux (Android)
-# ::   Version: 3.2.0
+# ::   Version: 3.2.1
 # ::
 # ::   Author: KBS - DTRH.net
 # :: --------------------------------------------------------------------
@@ -37,7 +37,7 @@ cat <<'EOF'
 
 ------------------------[ DTRH.NET ]-------------------------
  admin[AT]dtrh[DOT]net                            May 05,2025
- KBS                              silence gating: v3.2.0
+ KBS                              silence gating: v3.2.1
 . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
 
 EOF
@@ -430,11 +430,15 @@ queue_start() {
 }
 
 transcribe_worker() {
-  exec 8<"$QUEUE_FIFO"
-  while IFS=$'\t' read -r file hhmmss dur db peak; do
+  log_debug "worker[$BASHPID]: opening $QUEUE_FIFO"
+  exec 8<"$QUEUE_FIFO" || { log_warn "worker[$BASHPID]: cannot open queue"; return 1; }
+  log_debug "worker[$BASHPID]: queue open, waiting"
+  while IFS=$'\t' read -r -u 8 file hhmmss dur db peak; do   # -u 8! without it read takes stdin
     [[ -n "$file" ]] || continue
+    log_debug "worker[$BASHPID]: got $(basename "$file")"
     transcribe "$file" "$hhmmss" "$dur" "$db" "$peak"
   done
+  log_debug "worker[$BASHPID]: queue closed, exiting"
   exec 8<&-
 }
 

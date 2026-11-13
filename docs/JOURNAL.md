@@ -379,6 +379,22 @@ and the pocket tool's volume restore used a greedy `sed` that captured the wrong
 stream's volume, which is why TTS-based clips briefly began transcribing as
 silence.
 
+**First real recording (20 minutes, 60 utterances).** A live session on the
+table produced 60 journal entries, 934 words, 616 s of audio (mean 10.3 s,
+longest 48.6 s) in a 20-minute window, writing to the Obsidian vault rather than
+a test directory. Quality: no annotation leaks, no repeated phrases, and the
+only short entries are legitimate fragments (`"Uh"`, `"lots."`, `"one goal."`,
+`"- Sure."`). Levels: utterance mean dB −48.6 … −27.6 (p50 −38.4), peaks p50
+−21.0 with a maximum of **−0.5 dB** — near clipping, worth watching if the phone
+sits right in front of a speaker. Nothing was dropped and nothing was filtered
+as an artefact.
+
+It also found the queue bug described in the changelog: 88 fallbacks to inline
+transcription, because the worker's `read` was pulling stdin instead of the
+queue. No audio was lost — the fallback path is the original synchronous code —
+but the async path had never actually run. Instrumenting the worker showed it
+open the FIFO and then exit in the same second.
+
 ## 6. What the testing broke, and what was fixed
 
 Each of these was found by running it, not by reading it.
