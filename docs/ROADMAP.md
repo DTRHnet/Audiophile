@@ -32,7 +32,18 @@ per utterance. Still open: whether `DTRH_ENGINE=server` should become the
 default once it has survived a long run, and whether the saved time makes
 `base.en` viable (it is ~2× the compute; see the A/B in the journal).
 
-### 2. SD card for models and capture files
+### 2. SD card: captures and archives (models stay internal)
+
+*Status:* the card is mounted and writable (`/storage/7BFE-5787`, 30 GB), and
+the model question is now settled by measurement — see the benchmark in
+`JOURNAL.md`. Loading a model from exFAT cost ~12.4 s against ~6.8 s from
+internal storage, so **the active model stays on internal storage**; the card is
+for capture files, archives, and models that are not currently loaded.
+`DTRH_CAPTURE_DIR` already points anywhere, so moving captures to the card is a
+one-line configuration change; what remains is a free-space guard and a
+documented layout.
+
+### 2b. SD card for models and capture files
 
 *Why:* `/data` was at 97 % with ~1.1 GB free before `ggml-base.en.bin` (141 MB)
 was added. Audio and models do not belong in app-private storage on a phone

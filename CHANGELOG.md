@@ -11,7 +11,14 @@ in [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
 ## [Unreleased]
 
-Nothing yet — see the roadmap for what is queued.
+### Added
+
+* `audiophile-model-bench.sh` — benchmarks every `ggml-*.bin` it can find (or the
+  models you name) on this phone with this microphone: word error rate, latency,
+  realtime factor and cold load time, per model. It builds its clips by having
+  the phone speak known sentences and record itself, so no human input is
+  needed, and it prints the realtime factor because "can this keep up with how
+  much I talk" is the question that actually decides a default.
 
 ## [3.2.1] — 2026-11-12
 

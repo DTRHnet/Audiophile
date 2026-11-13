@@ -395,6 +395,35 @@ queue. No audio was lost — the fallback path is the original synchronous code 
 but the async path had never actually run. Instrumenting the worker showed it
 open the FIFO and then exit in the same second.
 
+**Model choice, measured twice** (`audiophile-model-bench.sh`, five TTS sentences
+per run, transcriptions scored against the text the phone spoke):
+
+| model | WER run 1 (on SD) | WER run 2 (internal) | RT factor | cold load |
+| --- | --- | --- | --- | --- |
+| `tiny.en` (74 MB) | 18.2 % | 18.2 % | **0.39×** | 3.1 s |
+| `base.en` (141 MB) | 14.5 % | 18.2 % | 0.79× | 6.6 s |
+| `base.en-q5_1` (56 MB) | 14.5 % | 18.2 % | **1.06×** | 11.5 s |
+
+Two runs disagree on accuracy and agree on latency, which is itself the
+conclusion: **the TTS-through-speaker audio path dominates the error rate.**
+Every model transcribed `"The audiophile pipeline…"` as `"The audio file
+pipeline…"` — a systematic mishearing of the recording chain, not of the model —
+so model-to-model differences sit inside clip-to-clip variance, while the
+latency ordering (`tiny` ≈ 0.4×, `base` ≈ 0.8×, `q5_1` ≈ 1.0× realtime) is
+stable.
+
+`base.en` is therefore never *worse* and sometimes better, but it doubles the
+compute for a difference this benchmark cannot resolve. **`tiny.en` stays the
+default.** `base.en` remains installed as the documented opt-in for anyone who
+would rather spend latency than risk a word. `base.en-q5_1` was deleted: it has
+no accuracy advantage here and at 1.06× realtime it cannot keep up with
+continuous speech.
+
+The SD card changed the storage argument but not this one: a 141 MB model fits
+in 1.3 GB of internal space, and loading a model from exFAT cost ~12.4 s versus
+~6.8 s from internal, so the active model belongs on internal storage either
+way. The card is for captures and archives.
+
 ## 6. What the testing broke, and what was fixed
 
 Each of these was found by running it, not by reading it.
