@@ -140,6 +140,8 @@ The quick brown fox jumps over the lazy dog.
 | `--status` | is an instance running? |
 | `--stop` | stop the running instance |
 | `--selftest` | run the VAD over a synthetic track (2 utterances expected) — works without a microphone |
+| `--replay PATH` | run the real pipeline over a file or directory of audio — no microphone, no waiting for someone to talk |
+| `--doctor` | check every dependency, permission, level and speed, then exit |
 | `--debug` | verbose logging, including every VAD level decision |
 | `--no-notify` | do not touch the notification shade |
 | `--work DIR` | write transcripts somewhere else |
@@ -231,6 +233,39 @@ as well as *detectable*.
 ```bash
 DTRH_SPEECH_DB=-47 DTRH_MIN_VOICED_DB=-50 ./DTRH-Audiophile.sh
 ```
+
+### Replaying recorded audio (no microphone)
+
+The same detector, the same whisper, the same journal — driven from a file
+instead of the microphone. This is how to tune thresholds or compare models
+without performing for the phone:
+
+```bash
+./DTRH-Audiophile.sh --replay ~/storage/shared/Obsidian/transcripts/.audiophile/audio/2026-11-12
+./DTRH-Audiophile.sh --replay recording.wav
+DTRH_MODEL=~/whisper.cpp/models/ggml-base.en.bin ./DTRH-Audiophile.sh --replay clip.wav
+```
+
+Each source file gets its own journal under `<work>/replay/<name>.md`, so a
+replay never touches your real daily notes. Replay transcribes inline (async is
+switched off) so each file's journal is complete when it is written.
+
+### Checking the install
+
+```bash
+./DTRH-Audiophile.sh --doctor
+```
+
+```
+  [ OK ] ffmpeg present            [ OK ] model: ggml-tiny.en.bin (74MB)
+  [ OK ] silero vad: ...           [ OK ] transcript dir writable
+  [ OK ] microphone delivers audio (peak -41.4)
+  [ OK ] whisper ran a 3s tone in 2877ms (0.96x realtime)
+== doctor: healthy (0 warning(s)) ==
+```
+
+It records three seconds and reports the peak level, so a silenced microphone
+(Android handing over zeros) is caught here rather than mid-journal.
 
 ### Keeping the audio (SD card)
 

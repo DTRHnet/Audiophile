@@ -13,6 +13,16 @@ in [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
 ### Added
 
+* **`--replay PATH`** — runs the whole pipeline (VAD, whisper, journal) over a
+  file or directory of recorded audio instead of the microphone. Each source
+  file writes its own journal under `<work>/replay/`, and replay transcribes
+  inline so a file's journal is complete before the next one starts. This is how
+  to tune thresholds or compare models when nobody is talking.
+* **`--doctor`** — one command that checks binaries, model, Silero model, script
+  files, transcript directory writability, free space, whether the microphone
+  actually delivers audio (it records 3 s and reports the peak, catching the
+  Android "digital silence" case) and how fast whisper runs. Exits non-zero on
+  failure.
 * **Optional audio retention** (`DTRH_RETAIN_AUDIO=1`) — each utterance's WAV is
   archived to the SD card (`<card>/audiophile/audio/YYYY-MM-DD/`) instead of
   being deleted, with `DTRH_AUDIO_DIR`, `DTRH_RETAIN_DAYS` pruning and a

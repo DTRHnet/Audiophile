@@ -440,6 +440,19 @@ two kept utterances, `tiny.en` re-transcribed at 3996 ms (0.79× realtime) and
 and it is the same verdict as the benchmark: base is twice the compute for no
 demonstrated accuracy gain.
 
+**Replay and doctor (built because nobody was talking).** `--replay DIR` drives
+the identical VAD → queue → whisper → journal path from a file instead of the
+microphone; it replayed the two kept utterances and produced one journal per
+file with the right sentence in each. `--doctor` reports every dependency plus a
+three-second microphone probe (peak −41.4 dB, so the mic was live) and a whisper
+speed check (2877 ms for a 3 s tone — and note that non-speech is whisper's
+*slow* case, real speech is faster).
+
+Replay exposed a bug in itself: with the async worker enabled, both transcripts
+were appended *after* the loop had moved on, so they landed in the last file's
+journal and the per-file counts read 0. Replay now forces inline transcription,
+which is correct because per-file journals must be complete when written.
+
 ## 6. What the testing broke, and what was fixed
 
 Each of these was found by running it, not by reading it.

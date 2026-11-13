@@ -135,8 +135,9 @@ switch for anyone who wants the WAVs kept.
 * A wake-word or "record only this app" mode, for people who do not want the
   room transcribed.
 * Speaker separation (diarisation) — real work, real value for meetings.
-* A `--replay FILE` mode to re-run the pipeline over recorded audio, so tuning
-  can be done without re-performing the audio.
+* ~~A `--replay FILE` mode to re-run the pipeline over recorded audio.~~
+  Shipped — together with `--doctor`, this means tuning and model comparison no
+  longer need a live speaker.
 
 ## Not doing
 

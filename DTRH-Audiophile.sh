@@ -168,6 +168,9 @@ usage: $(basename "$0") [options]
   --stop            stop a running instance
   --status          show whether an instance is running
   --selftest        run the VAD state machine against a synthetic track
+  --replay PATH     run the real pipeline over a file or a directory of audio
+                    (no microphone, no waiting for someone to talk)
+  --doctor          check every dependency, permission and level, then exit
   --debug           verbose (DEBUG) logging
   --no-notify       do not touch the notification shade
   --work DIR        transcript output directory
@@ -177,11 +180,14 @@ usage: $(basename "$0") [options]
 environment overrides: DTRH_SPEECH_DB DTRH_END_SILENCE_MS DTRH_PREROLL_MS
   DTRH_MIN_SPEECH_MS DTRH_MAX_SEGMENT_MS DTRH_THREADS DTRH_WORK DTRH_MODEL
   DTRH_ENC DTRH_BITRATE DTRH_RATE DTRH_ROTATE_IDLE_S DTRH_NOTIFY LOG_LEVEL
+  DTRH_RETAIN_AUDIO DTRH_AUDIO_DIR DTRH_RETAIN_DAYS DTRH_ENGINE DTRH_ASYNC
 EOF
 }
 
 # --- ARGUMENTS -------------------------------------------------------------
 SELFTEST=0
+DOCTOR=0
+REPLAY_SRC=""
 while (( $# )); do
   case "$1" in
     --tail)      tail -F "$LOGFILE"; exit 0;;
@@ -190,6 +196,8 @@ while (( $# )); do
     --work)      WORK="$2"; shift;;
     --model)     MODEL="$2"; shift;;
     --selftest)  SELFTEST=1;;
+    --replay)    REPLAY_SRC="$2"; shift;;
+    --doctor)    DOCTOR=1;;
     --stop)
       if [[ -s "$PIDFILE" ]]; then
         pid=$(<"$PIDFILE")
@@ -772,7 +780,139 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM HUP
 
+# --- REPLAY (offline) ------------------------------------------------------
+replay_pipeline() {   # $1 = audio file; mirrors pipeline_start without the recorder
+  local src="$1"
+  pipeline_stop
+  rm -f "$EVFIFO"
+  mkfifo -m 600 "$EVFIFO" || { log_error "cannot create $EVFIFO"; return 1; }
+  export VAD_OUTDIR="$CAPTURE_DIR/segments" VAD_TAG="rep" \
+         VAD_SPEECH_DB="$SPEECH_DB" VAD_MARGIN_DB="$MARGIN_DB" \
+         VAD_PREROLL_MS="$PREROLL_MS" VAD_ENDSIL_MS="$END_SILENCE_MS" \
+         VAD_MINSPEECH_MS="$MIN_SPEECH_MS" VAD_MAXSEG_MS="$MAX_SEGMENT_MS" \
+         VAD_MIN_VOICED_DB="$MIN_VOICED_DB" VAD_WARMUP_MS="$WARMUP_MS"
+  mkdir -p "$VAD_OUTDIR"
+  set -m
+  (
+    ffmpeg -hide_banner -nostdin -loglevel error -i "$src" \
+           -vn -ac 1 -ar 16000 -f s16le - 2>>"$LOGFILE" \
+      | python3 -u "$VAD_PY" 2>>"$LOGFILE"
+  ) >"$EVFIFO" 2>>"$LOGFILE" &
+  PIPE_PG=$!
+  set +m
+  exec 7<"$EVFIFO"
+  return 0
+}
+
+replay_run() {
+  local src="$1" files=() f
+  if [[ -d "$src" ]]; then
+    mapfile -t files < <(find "$src" -type f \( -name '*.wav' -o -name '*.ogg' -o -name '*.m4a' \) | sort)
+  elif [[ -f "$src" ]]; then
+    files=("$src")
+  else
+    die "replay: no such file or directory: $src"
+  fi
+  (( ${#files[@]} )) || die "replay: no audio inside $src"
+
+  RETAIN_AUDIO=0; ARCHIVE_OK=0          # never archive audio we are replaying
+  TOTAL_SEGMENTS=0; TOTAL_MS=0
+  log_info "replay: ${#files[@]} file(s) with $(basename "$MODEL") - no microphone needed"
+
+  for f in "${files[@]}"; do
+    mkdir -p "$WORK/replay"
+    DAILY_MD="$WORK/replay/$(basename "${f%.*}").md"
+    : >"$DAILY_MD"
+    LIVE_EPOCH=$(date +%s)
+    log_info "replay: $(basename "$f") ($(ffprobe -v error -show_entries format=duration -of csv=p=0 "$f" 2>/dev/null || echo '?')s) -> $(shorten_path "$DAILY_MD")"
+    replay_pipeline "$f" || { log_error "replay failed for $f"; continue; }
+    while IFS= read -r line <&7; do handle_event "$line"; done
+    pipeline_stop
+    log_info "replay: $(basename "$f") wrote $(grep -c '^## ' "$DAILY_MD" 2>/dev/null) utterance(s)"
+  done
+  log_info "replay done: $TOTAL_SEGMENTS utterance(s), ${TOTAL_MS}ms of speech claimable"
+  return 0
+}
+
+# --- DOCTOR ----------------------------------------------------------------
+doctor() {
+  local fails=0 warns=0
+  ok()   { printf '  [ OK ] %s\n' "$1"; }
+  bad()  { printf '  [FAIL] %s\n' "$1"; fails=$((fails + 1)); }
+  hmm()  { printf '  [WARN] %s\n' "$1"; warns=$((warns + 1)); }
+  echo "== doctor =="
+  for b in ffmpeg ffprobe python3 termux-microphone-record; do
+    command -v "$b" >/dev/null 2>&1 && ok "$b present" || bad "$b missing"
+  done
+  [[ -x "$WHISPER" ]] && ok "whisper-cli: $(shorten_path "$WHISPER")" || bad "whisper-cli missing at $(shorten_path "$WHISPER")"
+  [[ -s "$MODEL" ]] && ok "model: $(basename "$MODEL") ($(( $(stat -c %s "$MODEL") / 1048576 ))MB)" || bad "model missing: $(shorten_path "$MODEL")"
+  [[ -s "$WHISPER_VAD_FILE" ]] && ok "silero vad: $(basename "$WHISPER_VAD_FILE")" || hmm "no silero model - noise can be transcribed as text"
+  [[ -f "$VAD_PY" && -f "$FOLLOW_PY" ]] && ok "vad + follower scripts present" || bad "audiophile-vad.py / audiophile-follow.py missing"
+  for c in curl; do command -v "$c" >/dev/null 2>&1 && ok "$c present" || hmm "$c missing (only needed for DTRH_ENGINE=server)"; done
+
+  # storage
+  if ( : >"$WORK/.dtest" ) 2>/dev/null && rm -f "$WORK/.dtest"; then
+    ok "transcript dir writable: $(shorten_path "$WORK")"
+  else
+    bad "transcript dir not writable: $(shorten_path "$WORK")"
+  fi
+  local dfree; dfree=$(df -m "$WORK" 2>/dev/null | awk 'NR==2{print $4}')
+  [[ -n "$dfree" ]] && { (( dfree > 200 )) && ok "/data has ${dfree}MB free" || hmm "/data only ${dfree}MB free"; }
+
+  # microphone actually delivering audio (not digital silence)
+  termux-microphone-record -q >/dev/null 2>&1; sleep 0.3
+  local mt="$CAPTURE_DIR/doctor.m4a"
+  termux-microphone-record -f "$mt" -l 0 >/dev/null 2>&1
+  sleep 3
+  termux-microphone-record -q >/dev/null 2>&1; sleep 0.5
+  if [[ -s "$mt" ]]; then
+    local lvl; lvl=$(ffmpeg -hide_banner -nostats -i "$mt" -af volumedetect -f null - 2>&1 | grep -oE 'max_volume: [^ ]+ dB' | head -1 | awk '{print $2}')
+    if [[ -n "$lvl" ]] && awk -v l="$lvl" 'BEGIN{exit (l+0 > -90 ? 0 : 1)}'; then
+      ok "microphone delivers audio (peak ${lvl})"
+    else
+      bad "microphone returns digital silence (peak ${lvl}) - open Termux once and grant the mic permission"
+    fi
+    rm -f "$mt"
+  else
+    bad "recorder produced no file"
+  fi
+
+  # whisper speed on a synthetic tone (no speech, no waiting for a speaker)
+  local tt="$CAPTURE_DIR/doctor.wav"
+  if ffmpeg -hide_banner -loglevel error -y -f lavfi -i "sine=frequency=220:duration=3" -ar 16000 -ac 1 "$tt" 2>/dev/null; then
+    local t0 t1 ms
+    t0=$(date +%s%N)
+    "$WHISPER" -m "$MODEL" -f "$tt" -otxt -of "$CAPTURE_DIR/doctor" -t "$THREADS" -np -nt -l en >/dev/null 2>&1
+    t1=$(date +%s%N)
+    ms=$(( (t1 - t0) / 1000000 ))
+    ok "whisper ran a 3s tone in ${ms}ms ($(python3 -c "print('%.2fx realtime' % ($ms/1000.0/3))")) - non-speech is whisper's slow case, real speech is faster"
+    rm -f "$tt" "$CAPTURE_DIR/doctor.txt"
+  else
+    hmm "could not synthesise an audio file for the whisper speed test"
+  fi
+
+  echo
+  if (( fails )); then
+    echo "== doctor: ${fails} failure(s), ${warns} warning(s) - fix the failures first =="
+  else
+    echo "== doctor: healthy (${warns} warning(s)) =="
+  fi
+  return $(( fails > 0 ))
+}
+
 # --- RUN -------------------------------------------------------------------
+if (( DOCTOR )); then doctor; exit $?; fi
+
+if [[ -n "$REPLAY_SRC" ]]; then
+  # Replay writes one journal per source file. Transcription has to finish
+  # before the target file changes, so the async worker is turned off here.
+  ASYNC=0
+  server_start
+  queue_start
+  replay_run "$REPLAY_SRC"
+  exit $?
+fi
+
 termux-wake-lock >/dev/null 2>&1 || true
 log_info "starting: silence-gated transcription (preroll ${PREROLL_MS}ms, end-silence ${END_SILENCE_MS}ms)"
 
