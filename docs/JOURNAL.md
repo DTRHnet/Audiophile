@@ -309,6 +309,25 @@ sentence out of six. Both models render "audiophile" as "audio file" and
 model capacity. Caveat: six TTS sentences through a speaker into a phone mic is
 a small, slightly artificial sample; it decides the *default*, not the ceiling.
 
+**Pocket acoustics, simulated.** Clean speech was filtered like fabric
+(`highpass=200,lowpass=2500`, −12 dB) and mixed over a synthetic pocket bed
+(brown-noise rumble lowpassed at 350 Hz plus tremolo'd pink-noise rustle). With
+a loud bed the wideband level is useless as a discriminator — pocket noise and
+muffled speech both measured −30.8 dB mean — Silero still accepted the speech,
+and whisper produced `file pipeline.` from a sentence it otherwise transcribes
+word for word. With a realistic bed (mean −54.5 dB) the separation is +12.4 dB
+at the 90th percentile, which the tool calls WORKABLE. Caveat: these beds are
+synthetic and one of them was unrealistically loud, so they show the *failure
+mode*, not your pocket. Hence `audiophile-pocket-calibrate.sh`.
+
+**The pocket tool had to be corrected too.** Its first version compared the
+*median* of the talking phase against the noise — but in a speech-over-noise
+recording the median **is** the noise (measured −63.2 dB while the speech peaked
+at −32.9 dB), so a perfectly workable pocket was reported as UNUSABLE. It now
+compares high percentiles (speech p90 vs noise p95), reports threshold coverage,
+and states the effective threshold the script will actually use
+(`max(DTRH_SPEECH_DB, floor + margin)`).
+
 ## 6. What the testing broke, and what was fixed
 
 Each of these was found by running it, not by reading it.
@@ -389,6 +408,8 @@ Each of these was found by running it, not by reading it.
 * `audiophile-follow.py` — new, byte-exact file follower (replaces `tail -f`)
 * `audiophile-calibrate.sh` — new, prints the room's noise floor and a
   suggested `DTRH_SPEECH_DB`
+* `audiophile-pocket-calibrate.sh` — new, two-phase calibration for a phone kept
+  in a pocket: separation, coverage, verdict, suggested settings
 * `.gitignore` — keeps the runtime log and pidfile out of `git status`
 * `CHANGELOG.md` — version history
 * `docs/ROADMAP.md` — direction, queued work, and what is deliberately not planned

@@ -145,6 +145,9 @@ The quick brown fox jumps over the lazy dog.
 | `--work DIR` | write transcripts somewhere else |
 | `--model FILE` | use a different ggml model |
 
+`audiophile-pocket-calibrate.sh --analyse QUIET.wav TALKING.wav` re-analyses two
+existing recordings instead of recording again.
+
 ### Tuning it to your room
 
 ```bash
@@ -182,6 +185,44 @@ Example: a snappier configuration for a meeting room.
 
 ```bash
 DTRH_SPEECH_DB=-50 DTRH_END_SILENCE_MS=900 ./DTRH-Audiophile.sh --debug
+```
+
+### Calibrating for a pocket
+
+A phone in a pocket is a different room: fabric removes the high frequencies,
+your body adds low-frequency rumble, and cloth rustle adds bursts. Measure it
+instead of guessing:
+
+```bash
+cd ~/Audiophile
+./audiophile-pocket-calibrate.sh          # 12s quiet + 14s talking
+```
+
+Put the phone in the pocket you actually use, leave it there, and follow the
+buzzes: **one buzz = keep quiet**, **two buzzes = talk normally** (say the
+sentence printed on screen), **three buzzes = done**. Nothing is played through
+the speaker, because that would land in the recording.
+
+It reports the pocket's noise distribution, the level of your muffled speech,
+the separation between them, how much of your speech would clear the threshold,
+a verdict, and a ready-to-paste line:
+
+```
+pocket noise : p50 -54.6  p90 -53.1  p95 -52.4  p99 -52.2  max -52.2 dB
+pocket speech: p50 -63.2  p90 -40.0  p95 -36.4            max -32.9 dB
+separation   : 12.4 dB  (speech p90 minus noise p95)
+VERDICT: WORKABLE - usable; expect occasional missed or trimmed utterances
+SHELL: DTRH_SPEECH_DB=-47 DTRH_MIN_VOICED_DB=-50 DTRH_PREROLL_MS=2500 DTRH_END_SILENCE_MS=1200
+```
+
+Verdicts: **COMFORTABLE** (≥20 dB), **WORKABLE** (≥12), **MARGINAL** (≥6),
+**UNUSABLE** (<6 — the level detector cannot separate speech from that pocket,
+and the report says so instead of pretending). The last step also runs whisper
+on your talking phase, so you find out whether the muffled audio is *readable*
+as well as *detectable*.
+
+```bash
+DTRH_SPEECH_DB=-47 DTRH_MIN_VOICED_DB=-50 ./DTRH-Audiophile.sh
 ```
 
 ### Checking that it works

@@ -50,7 +50,28 @@ a startup check that refuses to run if free space is below a threshold instead
 of silently filling the partition. Success = a full day of capture on the SD
 card with `/data` untouched.
 
-### 3. Overnight, screen-off, Doze soak
+### 3. Pocket mode: measure it, then decide
+
+*Why:* a pocket muffles the microphone (high frequencies gone), adds body rumble
+and cloth-rustle bursts, and puts the phone further from the mouth. A synthetic
+pocket (fabric filtering + rumble + rustle) already shows the failure mode:
+with the bed loud enough, the wideband level of pocket noise and of muffled
+speech is *identical* (−30.8 dB for both), Silero still accepts the speech, and
+whisper degrades to `file pipeline.`.
+
+*Done:* `audiophile-pocket-calibrate.sh` measures the real pocket in two phases
+and reports separation, coverage, verdict and a ready-to-paste setting.
+
+*Next:* run it in the actual pocket, then act on the verdict:
+* **COMFORTABLE / WORKABLE** — just ship the suggested settings, and note that
+  `DTRH_PREROLL_MS` matters more here (the onset is quieter through fabric).
+* **MARGINAL / UNUSABLE** — the candidates are (a) measure level on a
+  speech-band signal (`highpass=200,lowpass=3500`) instead of wideband, which
+  suppresses rumble and rustle; (b) let Silero be the primary gate and keep the
+  energy VAD only as a cheap pre-filter; (c) accept that this pocket is not a
+  recording environment and say so. Pick with measurements, not intuition.
+
+### 4. Overnight, screen-off, Doze soak
 
 *Why:* the only promise still unproven. Screen-off capture was verified for
 ~30 s; nothing has run through a real night of Doze, and the device reported
@@ -63,7 +84,7 @@ the night in it and the battery delta is measured rather than guessed.
 
 ## Later
 
-### 4. Relax the first gate, let Silero do the filtering
+### 5. Relax the first gate, let Silero do the filtering
 
 *Why:* Silero made non-speech nearly free (empty result in ~0.4 s), while the
 energy gate still rejects anything whose voiced part averages below −50 dB —
@@ -74,20 +95,20 @@ second, semantic gate, the first one can afford to be more permissive.
 across the room) at `DTRH_MIN_VOICED_DB` −50 / −55 / −58, and check that junk
 does not come back. Change the default only if the numbers say so.
 
-### 5. Battery and thermal over a real hour
+### 6. Battery and thermal over a real hour
 
 *Why:* 5.7–7.8 % of one core at idle is a good proxy, not a battery figure.
 Success = %/hour drain on this 3000 mAh device with the screen off, and no
 thermal throttling that makes transcription slower than realtime.
 
-### 6. Autostart and the Tasker path
+### 7. Autostart and the Tasker path
 
 *Why:* the README documents a Termux:Tasker integration that nobody has ever
 executed, and nothing survives a reboot today (note: `adb tcpip` does not
 either, which matters for remote debugging). `termux-boot` makes the journal
 survive a restart.
 
-### 7. Privacy at rest
+### 8. Privacy at rest
 
 *Why:* transcripts and `index.jsonl` are plaintext in shared storage, readable
 by any app with storage access, and the audit trail retains audio statistics for
@@ -97,7 +118,7 @@ every utterance.
 the daily file, retention policy for the audit trail, and a `DTRH_RETAIN_AUDIO`
 switch for anyone who wants the WAVs kept.
 
-### 8. Optional extras, in rough order of value
+### 9. Optional extras, in rough order of value
 
 * Word-level timestamps in the journal (whisper already produces them; the
   `-nt` flag currently discards them).
