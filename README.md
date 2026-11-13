@@ -40,7 +40,7 @@ termux-microphone-record  ──►  one continuous Ogg/Opus stream (live.ogg)
                                  · 1.5 s of silence → utterance end
                                         │  one 16 kHz WAV per utterance
                                         ▼
-                              whisper-cli (tiny.en by default)
+                              whisper-cli (tiny.en) + Silero VAD
                                         │
                                         ▼
                           ~/storage/shared/Obsidian/transcripts/YYYY-MM-DD.md
@@ -103,7 +103,7 @@ in silence, so it cannot cut a word), which keeps disk use flat.
 
 3. **Download a Model**:
    ```bash
-   make -j tiny.en.bin     # fastest / least accurate
+   make -j tiny.en.bin     # default: fastest, 4.1s per utterance (measured)
    # or
    wget -c https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin \
         -P models/
@@ -171,6 +171,8 @@ Everything is overridable from the environment, no editing required:
 | `DTRH_ROTATE_IDLE_S` | `90` | recycle the capture file after this much silence |
 | `DTRH_ROTATE_MAX_MB` | `64` | hard size cap; enforced even in a noisy room |
 | `DTRH_THREADS` | `4` | whisper threads |
+| `DTRH_WHISPER_VAD` | `auto` | whisper's Silero VAD: `auto`, `off`, or a model path |
+| `DTRH_WHISPER_VAD_THRESHOLD` | `0.5` | Silero speech probability threshold |
 | `DTRH_WORK` | `~/storage/shared/Obsidian/transcripts` | output directory |
 | `DTRH_MODEL` | `~/whisper.cpp/models/ggml-tiny.en.bin` | model |
 | `DTRH_NOTIFY` | `1` | live notification |
@@ -274,6 +276,9 @@ commands that prove the pipeline still works are listed in
   got above `DTRH_MIN_VOICED_DB`.
 * **Whisper ran but nothing was written.** Same thing — the audio was music,
   a video or a door, not a voice. Raise or lower `DTRH_MIN_VOICED_DB` to taste.
+* **`no silero model found` at startup.** whisper then runs without its second
+  gate, so noise can still be described as `(music)`. Point `DTRH_WHISPER_VAD`
+  at a Silero ggml model, or set `DTRH_WHISPER_VAD=off` to silence the warning.
 * **The capture file keeps growing.** It is recycled after 90 s of silence, and
   hard-capped by `DTRH_ROTATE_MAX_MB` even when the room is never quiet (a
   noisy room never reports idle). Lower the cap if disk is tight. Larger
@@ -284,9 +289,29 @@ commands that prove the pipeline still works are listed in
 * **`--stop` says "not running" but the mic is still busy.**
   `termux-microphone-record -q` clears a stuck recorder.
 
+### Which model?
+
+`tiny.en` is the default and the measured winner for this use: over six spoken
+sentences it scored 9.5 % word error at 4.1 s per utterance, while `base.en`
+scored 6.3 % at 8.3 s — twice the time, slower than realtime on this phone, for
+one sentence corrected out of six. Use `base.en` only if accuracy matters more
+than latency:
+
+```bash
+wget -c https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin \
+     -P ~/whisper.cpp/models/
+DTRH_MODEL=~/whisper.cpp/models/ggml-base.en.bin ./DTRH-Audiophile.sh
+```
+
+Models are large (141 MB for `base.en`, 74 MB for `tiny.en`); watch free space
+on `/data`, and see `docs/ROADMAP.md` for moving them to an SD card.
+
 ## 7. Design notes
 
-`docs/JOURNAL.md` records the measurements behind every decision (recorder
+* [`CHANGELOG.md`](CHANGELOG.md) — what changed in each version, and why.
+* [`docs/ROADMAP.md`](docs/ROADMAP.md) — direction, what is queued next, and
+  what is deliberately not being done.
+* [`docs/JOURNAL.md`](docs/JOURNAL.md) — the measurements behind every decision (recorder
 timing, container streamability, dB levels, whisper latency, idle CPU), the
 approaches that were measured and rejected, the defects found during bring-up,
 the honest limits of the current design, and a §9 verification checklist to

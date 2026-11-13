@@ -3,7 +3,7 @@
 # ::
 # :: DTRH-Audiophile.sh
 # ::   A real-time audio to text logger for Termux (Android)
-# ::   Version: 3.0.0
+# ::   Version: 3.1.0
 # ::
 # ::   Author: KBS - DTRH.net
 # :: --------------------------------------------------------------------
@@ -37,7 +37,7 @@ cat <<'EOF'
 
 ------------------------[ DTRH.NET ]-------------------------
  admin[AT]dtrh[DOT]net                            May 05,2025
- KBS                                     silence gating: v3.0.0
+ KBS                              silence gating: v3.1.0
 . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
 
 EOF
@@ -76,6 +76,11 @@ ROTATE_IDLE_S="${DTRH_ROTATE_IDLE_S:-90}"   # rotate the capture file after this
 ROTATE_MIN_AGE_S="${DTRH_ROTATE_MIN_AGE_S:-120}"
 ROTATE_MAX_MB="${DTRH_ROTATE_MAX_MB:-64}"
 THREADS="${DTRH_THREADS:-4}"
+# Whisper's own VAD (Silero): a second gate after the energy VAD. Measured on
+# this device: pink noise and tones produce "" in ~0.4s instead of
+# "(dramatic music)"/"(beeping)" in ~3.5s, while real speech is untouched.
+WHISPER_VAD="${DTRH_WHISPER_VAD:-auto}"       # auto | off | path/to/silero.bin
+WHISPER_VAD_THR="${DTRH_WHISPER_VAD_THRESHOLD:-0.5}"
 NOTIFY="${DTRH_NOTIFY:-1}"
 AUDIT="${DTRH_AUDIT:-1}"
 NOTIF_ID=1
@@ -131,6 +136,7 @@ show_settings() {
   printf "${YEL}%-22s${NC}: %-40s\n" "Capture"        "${CAPTURE_ENC} ${CAPTURE_BITRATE}kbps (streamed, no slicing)"
   printf "${YEL}%-22s${NC}: %-40s\n" "Rotate after"   "${ROTATE_IDLE_S}s of silence"
   printf "${YEL}%-22s${NC}: %-40s\n" "Whisper threads" "$THREADS"
+  printf "${YEL}%-22s${NC}: %-40s\n" "Whisper VAD"     "$WHISPER_VAD (threshold ${WHISPER_VAD_THR})"
   printf "${YEL}%-22s${NC}: %-40s\n" "Notifications"  "$([ "$NOTIFY" = 1 ] && echo on || echo off)"
   printf "${YEL}%-22s${NC}: %s\n" "Log File"        "$(shorten_path "$LOGFILE")"
   printf "${YEL}%-22s${NC}: %s\n" "Script PID"      "$$"
@@ -238,6 +244,25 @@ have python3                  || die "python3 missing: pkg install python"
 [[ -f "$FOLLOW_PY" ]]         || die "audiophile-follow.py not found next to this script"
 [[ -x "$WHISPER" ]]           || die "whisper-cli not found at $(shorten_path "$WHISPER")"
 [[ -s "$MODEL" ]]             || die "model not found at $(shorten_path "$MODEL")"
+
+# --- WHISPER VAD (silero) --------------------------------------------------
+WHISPER_VAD_FILE=""
+if [[ "$WHISPER_VAD" != "off" ]]; then
+  if [[ "$WHISPER_VAD" != "auto" ]]; then
+    WHISPER_VAD_FILE="$WHISPER_VAD"
+  else
+    for cand in "$HOME"/whisper.cpp/models/*silero*.bin                 "$(dirname "$WHISPER")"/../models/*silero*.bin; do
+      [[ -s "$cand" ]] && { WHISPER_VAD_FILE="$cand"; break; }
+    done
+  fi
+  if [[ -s "$WHISPER_VAD_FILE" ]]; then
+    log_info "whisper vad: silero ($(basename "$WHISPER_VAD_FILE"), threshold ${WHISPER_VAD_THR})"
+  else
+    WHISPER_VAD_FILE=""
+    log_warn "no silero model found - non-speech audio will reach whisper and may be invented as text"
+    log_warn "point DTRH_WHISPER_VAD at a Silero ggml model (see whisper.cpp models/README.md)"
+  fi
+fi
 
 # --- PID LOCK --------------------------------------------------------------
 if [[ -e "$PIDFILE" ]]; then
@@ -427,8 +452,10 @@ transcribe() { # $1=wav $2=stream t0 $3=dur $4=db $5=peak
   local hhmmss
   hhmmss=$(date -d "@$(( LIVE_EPOCH + ${t0%.*} ))" +%H:%M:%S 2>/dev/null || date +%H:%M:%S)
 
+  local vad_args=()
+  [[ -n "$WHISPER_VAD_FILE" ]] && vad_args=(--vad -vm "$WHISPER_VAD_FILE" -vt "$WHISPER_VAD_THR")
   if ! "$WHISPER" -m "$MODEL" -f "$wav" -otxt -of "$base" -l en \
-        -t "$THREADS" -np -nt >>"$LOGFILE" 2>&1; then
+        -t "$THREADS" -np -nt "${vad_args[@]}" >>"$LOGFILE" 2>&1; then
     log_error "whisper failed on $(basename "$wav")"
     rm -f "$wav" "$txt"
     return 1

@@ -276,6 +276,39 @@ orchestrator ≈ 0. For comparison, v2 ran a full whisper pass every 30 s; at
 0.4× realtime that alone is ~40 % of a core, plus an ffmpeg conversion per
 slice.
 
+**Silero VAD as a second gate** (6 s clips, `whisper-cli --vad -vm <silero>
+-vt 0.5`, `ggml-tiny.en.bin`):
+
+| clip | without `--vad` | with Silero |
+| --- | --- | --- |
+| pink noise | `(dramatic music)` — 3307 ms | **empty** — 419 ms |
+| 440 + 660 Hz tones | `(beeping)` — 3570 ms | **empty** — 463 ms |
+| real speech | `Please transcribe this spoken sentence into the journal.` — 3839 ms | same text — 4008 ms |
+
+So the semantic gate removes non-speech at the source *and* makes it ~8× cheaper
+(whisper skips the encoder work), for ~170 ms of extra overhead on real speech.
+Wired in as `--vad -vm … -vt 0.5`, auto-detected, and verified end to end on the
+device: `[INFO] whisper vad: silero (for-tests-silero-v6.2.0-ggml.bin,
+threshold 0.5)` followed by a correct transcript, and with a deliberately wrong
+`DTRH_WHISPER_VAD` the pipeline warns
+(`no silero model found - non-speech audio will reach whisper`) and keeps
+transcribing rather than failing. The model present in this checkout is the
+whisper.cpp test build; a released Silero ggml is the right thing to ship.
+
+**`tiny.en` vs `base.en`**, six spoken sentences captured through the
+microphone, numbered/currency formatting normalised before scoring:
+
+| model | WER over 63 words | per utterance | worst case |
+| --- | --- | --- | --- |
+| `tiny.en` | **9.5 %** | **4.1 s** | "with" → "a" in one sentence |
+| `base.en` | 6.3 % | **8.3 s** | same two mishearings, one sentence fixed |
+
+`base.en` costs 2× the time — slower than realtime on this SoC — to fix one
+sentence out of six. Both models render "audiophile" as "audio file" and
+"Silero" as "cellular", which points at the microphone/TTS chain rather than
+model capacity. Caveat: six TTS sentences through a speaker into a phone mic is
+a small, slightly artificial sample; it decides the *default*, not the ceiling.
+
 ## 6. What the testing broke, and what was fixed
 
 Each of these was found by running it, not by reading it.
@@ -338,6 +371,14 @@ Each of these was found by running it, not by reading it.
 * Screen-off capture was verified in one ~30 s test, not overnight with Doze.
 * No tests with a headset, Bluetooth or speakerphone routing.
 * The canned-phrase list and the annotation rule are hand-written, not learned.
+* The Silero model in this checkout is whisper.cpp's `for-tests-silero-v6.2.0`
+  build, not a released Silero; it demonstrably works here, but shipping should
+  use a proper release. `--vad-threshold 0.5` was not swept — only spot-checked.
+* The `base.en` A/B is six TTS sentences (63 words) — enough to choose a default,
+  not enough to claim a general accuracy figure.
+* Disk is the binding constraint on this phone: `/data` was at 97 % (1.3 GB
+  free), and `ggml-base.en.bin` is 141 MB. Models belong on removable storage;
+  that is queued in `docs/ROADMAP.md`.
 * `DTRH_END_SILENCE_MS=1500` will split a slow speaker with long pauses into
   several utterances; that is a tuning knob, not a bug.
 
@@ -349,7 +390,9 @@ Each of these was found by running it, not by reading it.
 * `audiophile-calibrate.sh` — new, prints the room's noise floor and a
   suggested `DTRH_SPEECH_DB`
 * `.gitignore` — keeps the runtime log and pidfile out of `git status`
-* `README.md` — updated for v3
+* `CHANGELOG.md` — version history
+* `docs/ROADMAP.md` — direction, queued work, and what is deliberately not planned
+* `README.md` — updated for v3 / v3.1
 
 ## 9. Verification checklist
 
