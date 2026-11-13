@@ -11,6 +11,17 @@ in [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
 ## [Unreleased]
 
+### Documentation
+
+* Public-facing documentation rebuilt as a set: a decisive `README.md` with a
+  verified / experimental / does-not-work status split, `docs/ARCHITECTURE.md`
+  (how it works and what was rejected), `docs/OPERATIONS.md` (install, daily use,
+  tuning by symptom, verification checklist, new-device bring-up) and
+  `docs/EXPORTS.md` (the plan for using the transcripts: time ranges, digests,
+  summaries, delivery targets, privacy tiers). `docs/ROADMAP.md` rewritten around
+  that plan; `JOURNAL.md` reframed as the lab notebook and its checklist pointed at
+  OPERATIONS so there is one copy.
+
 ### Added
 
 * **`--replay PATH`** — runs the whole pipeline (VAD, whisper, journal) over a

@@ -1,4 +1,12 @@
-# Engineering journal — Audiophile v3 "silence gating"
+# Engineering journal
+
+This is the lab notebook, not the manual: every measurement behind every default,
+and every defect found by running the thing. If you are here to *use* Audiophile,
+start at the [README](../README.md); for how it works see
+[ARCHITECTURE.md](ARCHITECTURE.md), for running it [OPERATIONS.md](OPERATIONS.md),
+for what is next [ROADMAP.md](ROADMAP.md), and for what the transcripts are for
+[EXPORTS.md](EXPORTS.md). Numbers here are measurements on real hardware, each
+labelled with how it was obtained.
 
 Date: 2026-11-12
 Target device: LG G7 ThinQ (`LM-G710`, `judyln`), Android 10, Termux (F-Droid),
@@ -542,72 +550,6 @@ Each of these was found by running it, not by reading it.
 
 ## 9. Verification checklist
 
-Run this after any change to the pipeline. Each step has an expected result; if
-it does not match, the change is not done.
-
-**On any machine, no phone and no microphone needed:**
-
-```bash
-./DTRH-Audiophile.sh --selftest
-# expect: "segments written: 2 (expected 2)"  and  "SELFTEST PASS"
-```
-
-**On the phone, in `~/Audiophile`:**
-
-```bash
-# 1. what this room actually sounds like
-./audiophile-calibrate.sh 12
-# expect: "blocks: N (100 ms each ...)", "noise floor (quietest third) = .. dB",
-#         "suggested: DTRH_SPEECH_DB=.."   (this phone/room measured -61)
-
-# 2. a silent minute must produce nothing at all
-: > DTRH-Audiophile.log      # the log APPENDS across runs - truncate it first,
-                            # otherwise every grep below reports old runs too
-DTRH_WORK=~/tmp/verify DTRH_NOTIFY=0 DTRH_ROTATE_IDLE_S=20 \
-  DTRH_ROTATE_MIN_AGE_S=15 ./DTRH-Audiophile.sh --debug &
-sleep 55; ./DTRH-Audiophile.sh --stop
-# ALWAYS expect:
-#   last line "utterances this run: 0 (0ms of speech) - goodbye."
-#   no "-> whisper" line, no *.md in DTRH_WORK, pidfile gone, no strays
-#
-# expect "no speech for 30s - recycling the capture file" ONLY if the room was
-# genuinely quiet for the whole window. Grep "speech onset" before concluding:
-# any sound above DTRH_SPEECH_DB restarts the idle timer and rotation is then
-# correctly skipped. In that case what you should see instead is the gates:
-#   "dropped 3.60s of audio: too_short (voiced 300ms, -48.1dB)"
-#   "dropped 2.60s of audio: too_short (voiced 300ms, -54.0dB)"
-# i.e. a sound was noticed and deliberately not sent to whisper. A non-silent
-# room is not a failed test - a whisper call or a written segment is.
-
-# 3. real speech must come out verbatim
-: > DTRH-Audiophile.log      # again: one run per log check
-DTRH_WORK=~/tmp/verify DTRH_NOTIFY=0 ./DTRH-Audiophile.sh --debug &
-# say one clear sentence, wait ~10 s
-# expect: a "## HH:MM:SS (Ns)" block containing that sentence, and
-#         exactly one "-> whisper" line per utterance
-
-# 4. cost when nobody is talking (needs an idle window, >= 45 s)
-# expect: ~6-8 % of one core total (ffmpeg ~4 %, VAD ~3 %)
-# measured on the LG G7: 5.7 % in a quiet room, 7.8 % with a video playing
-
-# 5. clean shutdown
-./DTRH-Audiophile.sh --stop
-# expect: pidfile removed, "ps -A | grep audiophile" empty, capture dir empty,
-#         "utterances this run: N ... goodbye." in the log
-```
-
-**On the phone with the screen off** (the pocket case):
-
-```bash
-adb shell input keyevent KEYCODE_POWER          # screen off
-# speak, then check the journal: the utterance must still appear
-```
-
-The last line of every run is the per-run summary
-(`utterances this run: N (...) - goodbye.`) — that number is the one to trust
-when the log has not been truncated.
-
-Two things to remember when reading results: `-91.0 dB` from the microphone
-means Android handed over silence (open the Termux app once), and a `drop
-reason=quiet` line means the sound crossed the onset threshold but was not
-loud enough to be a voice — that is the second gate working, not a failure.
+Moved to [`OPERATIONS.md`](OPERATIONS.md) so there is a single copy. The rule it
+encodes is worth repeating here: a change is not done until the same commands
+that proved the previous version still pass.
