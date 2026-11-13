@@ -177,6 +177,10 @@ Everything is overridable from the environment, no editing required:
 | `DTRH_WHISPER_VAD` | `auto` | whisper's Silero VAD: `auto`, `off`, or a model path |
 | `DTRH_WHISPER_VAD_THRESHOLD` | `0.5` | Silero speech probability threshold |
 | `DTRH_ASYNC` | `1` | transcribe in a worker so the listener never blocks |
+| `DTRH_RETAIN_AUDIO` | `0` | `1` keeps each utterance's WAV instead of deleting it |
+| `DTRH_AUDIO_DIR` | *(auto)* | where kept audio goes; empty = first writable SD card |
+| `DTRH_RETAIN_DAYS` | `0` | prune kept audio older than N days (0 = keep forever) |
+| `DTRH_RETAIN_MIN_FREE_MB` | `500` | stop keeping audio if the volume gets this full |
 | `DTRH_ENGINE` | `cli` | `cli`, or `server` to keep the model resident |
 | `DTRH_SERVER_PORT` | `8087` | loopback port for `DTRH_ENGINE=server` |
 | `DTRH_WORK` | `~/storage/shared/Obsidian/transcripts` | output directory |
@@ -227,6 +231,36 @@ as well as *detectable*.
 ```bash
 DTRH_SPEECH_DB=-47 DTRH_MIN_VOICED_DB=-50 ./DTRH-Audiophile.sh
 ```
+
+### Keeping the audio (SD card)
+
+By default each utterance's WAV is deleted once it is transcribed. Keep them
+instead, and you can re-transcribe real speech with a better model later:
+
+```bash
+DTRH_RETAIN_AUDIO=1 ./DTRH-Audiophile.sh
+```
+
+Audio lands under `<SD card>/audiophile/audio/YYYY-MM-DD/`, one WAV per
+utterance, and the audit trail records the path. The card is auto-detected;
+override with `DTRH_AUDIO_DIR`. Keeping stops automatically below
+`DTRH_RETAIN_MIN_FREE_MB`, and `DTRH_RETAIN_DAYS=14` prunes old days.
+
+Then compare models on **your** voice rather than on synthetic clips:
+
+```bash
+./audiophile-retranscribe.sh -n 20        # newest 20 utterances, all models found
+./audiophile-retranscribe.sh -n 50 -m ~/whisper.cpp/models/ggml-base.en.bin
+```
+
+It prints one row per utterance with each model's latency and word count, then
+a per-model summary (mean latency, realtime factor) and a side-by-side report
+written to `$TMPDIR/retranscribe/compare_*.md`.
+
+Storage guidance: keep the **active model on internal storage** (loading from
+exFAT measured ~12.4 s against ~6.8 s internal), and use the card for kept audio
+and archives. The live capture file does not belong on the card - it is written
+to continuously and deleted seconds later.
 
 ### Checking that it works
 

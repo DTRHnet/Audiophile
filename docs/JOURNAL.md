@@ -424,6 +424,22 @@ in 1.3 GB of internal space, and loading a model from exFAT cost ~12.4 s versus
 ~6.8 s from internal, so the active model belongs on internal storage either
 way. The card is for captures and archives.
 
+**SD card (30 GB, exFAT, mounted at `/storage/7BFE-5787`).** Termux can write
+to it, so kept audio now lands there automatically:
+`DTRH_RETAIN_AUDIO=1` → `/storage/7BFE-5787/audiophile/audio/2026-11-12/`, one
+WAV per utterance, path recorded in the audit line. Formatting it NTFS was
+considered and rejected: Android 10 has no native NTFS write support, so the
+card would likely stop mounting; the ~12.4 s model load from exFAT is card/reader
+throughput, not the filesystem, and the fix for it is keeping the active model
+internal.
+
+`audiophile-retranscribe.sh` closes the loop the retention was added for — on
+two kept utterances, `tiny.en` re-transcribed at 3996 ms (0.79× realtime) and
+`base.en` at 7838 ms (1.55× realtime) for the same 16 words. These clips carry
+2 s of pre-roll silence each, which inflates both figures, but the ratio holds
+and it is the same verdict as the benchmark: base is twice the compute for no
+demonstrated accuracy gain.
+
 ## 6. What the testing broke, and what was fixed
 
 Each of these was found by running it, not by reading it.

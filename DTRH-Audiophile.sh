@@ -76,6 +76,12 @@ ROTATE_IDLE_S="${DTRH_ROTATE_IDLE_S:-90}"   # rotate the capture file after this
 ROTATE_MIN_AGE_S="${DTRH_ROTATE_MIN_AGE_S:-120}"
 ROTATE_MAX_MB="${DTRH_ROTATE_MAX_MB:-64}"
 THREADS="${DTRH_THREADS:-4}"
+# Keep the utterance audio instead of deleting it. Useful for re-transcribing
+# real speech with a different model later. 0 = delete (default), 1 = keep.
+RETAIN_AUDIO="${DTRH_RETAIN_AUDIO:-0}"
+AUDIO_DIR="${DTRH_AUDIO_DIR:-}"          # empty = auto-detect the SD card
+RETAIN_DAYS="${DTRH_RETAIN_DAYS:-0}"     # 0 = keep forever, otherwise prune
+RETAIN_MIN_FREE_MB="${DTRH_RETAIN_MIN_FREE_MB:-500}"
 # Whisper's own VAD (Silero): a second gate after the energy VAD. Measured on
 # this device: pink noise and tones produce "" in ~0.4s instead of
 # "(dramatic music)"/"(beeping)" in ~3.5s, while real speech is untouched.
@@ -146,6 +152,7 @@ show_settings() {
   printf "${YEL}%-22s${NC}: %-40s\n" "Whisper threads" "$THREADS"
   printf "${YEL}%-22s${NC}: %-40s\n" "Whisper VAD"     "$WHISPER_VAD (threshold ${WHISPER_VAD_THR})"
   printf "${YEL}%-22s${NC}: %-40s\n" "Engine / queue"  "${ENGINE} / async=$([ "$ASYNC" = 1 ] && echo on || echo off)"
+  printf "${YEL}%-22s${NC}: %-40s\n" "Retain audio"    "$([ "$RETAIN_AUDIO" = 1 ] && echo "yes (${AUDIO_DIR:-auto})" || echo no)"
   printf "${YEL}%-22s${NC}: %-40s\n" "Notifications"  "$([ "$NOTIFY" = 1 ] && echo on || echo off)"
   printf "${YEL}%-22s${NC}: %s\n" "Log File"        "$(shorten_path "$LOGFILE")"
   printf "${YEL}%-22s${NC}: %s\n" "Script PID"      "$$"
@@ -273,6 +280,61 @@ if [[ "$WHISPER_VAD" != "off" ]]; then
   fi
 fi
 
+# --- RETAINED AUDIO (optional, SD card friendly) ---------------------------
+ARCHIVE_OK=0
+AUDIO_ROOT=""
+if (( RETAIN_AUDIO )); then
+  probe_writable() { [[ -d "$1" ]] || return 1; ( : >"$1/.wtest" ) 2>/dev/null && rm -f "$1/.wtest"; }
+  if [[ -n "$AUDIO_DIR" ]]; then
+    mkdir -p "$AUDIO_DIR" 2>/dev/null
+    probe_writable "$AUDIO_DIR" && AUDIO_ROOT="$AUDIO_DIR"
+  else
+    # first removable volume that accepts writes: /storage/<UUID>/audiophile/audio
+    for vol in /storage/*-*; do
+      [[ -d "$vol" ]] || continue
+      mkdir -p "$vol/audiophile/audio" 2>/dev/null
+      probe_writable "$vol/audiophile/audio" && { AUDIO_ROOT="$vol/audiophile/audio"; break; }
+    done
+  fi
+  if [[ -n "$AUDIO_ROOT" ]]; then
+    ARCHIVE_OK=1
+    log_info "retaining utterance audio in $(shorten_path "$AUDIO_ROOT")"
+  else
+    log_warn "DTRH_RETAIN_AUDIO=1 but no writable location found - audio will be deleted"
+    RETAIN_AUDIO=0
+  fi
+fi
+
+archive_space_kb() { df -k "$AUDIO_ROOT" 2>/dev/null | awk 'NR==2{print $4}'; }
+
+archive_segment() {  # $1 = wav path; returns 0 if it was archived
+  (( ARCHIVE_OK )) || return 1
+  local wav="$1"
+  local free; free=$(archive_space_kb)
+  if [[ -n "$free" ]] && (( free < RETAIN_MIN_FREE_MB * 1024 )); then
+    ARCHIVE_OK=0
+    log_warn "retained-audio volume below ${RETAIN_MIN_FREE_MB}MB free - archiving off"
+    return 1
+  fi
+  local dest="$AUDIO_ROOT/$(date +%F)"
+  mkdir -p "$dest" || return 1
+  mv -f "$wav" "$dest/" 2>/dev/null || return 1
+  ARCHIVED_PATH="$dest/$(basename "$wav")"
+  log_debug "archived $(basename "$wav")"
+  return 0
+}
+
+prune_archive() {
+  (( ARCHIVE_OK && RETAIN_DAYS > 0 )) || return 0
+  local cutoff; cutoff=$(date -d "-${RETAIN_DAYS} days" +%F 2>/dev/null) || return 0
+  local d
+  for d in "$AUDIO_ROOT"/*/; do
+    [[ -d "$d" ]] || continue
+    local day; day=$(basename "$d")
+    [[ "$day" < "$cutoff" ]] && { rm -rf "$d"; log_info "pruned archived audio ${day}"; }
+  done
+}
+
 # --- PID LOCK --------------------------------------------------------------
 if [[ -e "$PIDFILE" ]]; then
   oldpid=$(<"$PIDFILE")
@@ -308,6 +370,8 @@ QUEUE_FIFO=""
 WORKER_PID=""
 SERVER_PID=""
 JOBS_QUEUED=0
+ARCHIVE_COUNT=0
+ARCHIVED_PATH=""
 LEVEL_TICKS=0
 QUIET_DROPS=0
 QUIET_ADVISED=0
@@ -513,11 +577,13 @@ append_md() { # $1=wall HH:MM:SS  $2=duration  $3=text
   log_info ">> $hhmmss (${dur}s) $text"
 }
 
-audit_line() { # $1=wav $2=t0 $3=dur $4=db $5=peak $6=text
+audit_line() { # $1=wav $2=hhmmss $3=dur $4=db $5=peak $6=text $7=archived_path
   (( AUDIT )) || return 0
   mkdir -p "$(dirname "$AUDIT_JSONL")"
-  printf '{"ts":"%s","file":"%s","t0":%s,"dur":%s,"db":%s,"peak":%s,"text":"%s"}\n' \
-    "$(date -Iseconds)" "$(basename "$1")" "$2" "$3" "$4" "$5" \
+  local audio_json="null"
+  [[ -n "${7:-}" ]] && audio_json="\"$(printf '%s' "$7" | sed 's/\\/\\\\/g; s/"/\\"/g')\""
+  printf '{"ts":"%s","file":"%s","at":"%s","dur":%s,"db":%s,"peak":%s,"audio":%s,"text":"%s"}\n' \
+    "$(date -Iseconds)" "$(basename "$1")" "$2" "$3" "$4" "$5" "$audio_json" \
     "$(printf '%s' "$6" | sed 's/\\/\\\\/g; s/"/\\"/g')" >>"$AUDIT_JSONL"
 }
 
@@ -593,9 +659,14 @@ transcribe() { # $1=wav $2=wall HH:MM:SS $3=dur $4=db $5=peak
     log_debug "dropped whisper artefact ($HALLU_REASON): \"$text\""
   else
     append_md "$hhmmss" "$dur" "$text"
-    audit_line "$wav" "$t0" "$dur" "$db" "$peak" "$text"
+    AUDIO_KEPT=""
+    ARCHIVED_PATH=""
+    archive_segment "$wav" && AUDIO_KEPT="$ARCHIVED_PATH"
+    audit_line "$wav" "$hhmmss" "$dur" "$db" "$peak" "$text" "$AUDIO_KEPT"
     TOTAL_SEGMENTS=$(( TOTAL_SEGMENTS + 1 ))
     TOTAL_MS=$(( TOTAL_MS + ${dur%.*} * 1000 ))
+    (( ARCHIVE_COUNT++ ))
+    (( ARCHIVE_COUNT % 200 == 0 )) && prune_archive
   fi
   rm -f "$wav" "$txt"
 }
@@ -695,6 +766,7 @@ cleanup() {
   rm -rf "${CAPTURE_DIR:?}/segments" 2>/dev/null || true
   termux-notification-remove --id "$NOTIF_ID" >/dev/null 2>&1 || true
   termux-wake-unlock >/dev/null 2>&1 || true
+  prune_archive
   rm -f "$PIDFILE"
   log_info "utterances this run: $TOTAL_SEGMENTS (${TOTAL_MS}ms of speech) - goodbye."
 }

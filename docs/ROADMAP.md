@@ -43,7 +43,12 @@ for capture files, archives, and models that are not currently loaded.
 one-line configuration change; what remains is a free-space guard and a
 documented layout.
 
-### 2b. SD card for models and capture files
+### 2b. ~~SD card for models and capture files~~ — done
+
+Shipped: kept audio (`DTRH_RETAIN_AUDIO=1`) auto-lands on the card, with pruning
+and a free-space guard; `audiophile-retranscribe.sh` compares models on that
+audio; models stay internal for load speed. What remains from the original item
+is only deciding `DTRH_RETAIN_DAYS` for long-term use.
 
 *Why:* `/data` was at 97 % with ~1.1 GB free before `ggml-base.en.bin` (141 MB)
 was added. Audio and models do not belong in app-private storage on a phone

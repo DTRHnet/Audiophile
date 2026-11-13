@@ -13,6 +13,15 @@ in [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
 ### Added
 
+* **Optional audio retention** (`DTRH_RETAIN_AUDIO=1`) — each utterance's WAV is
+  archived to the SD card (`<card>/audiophile/audio/YYYY-MM-DD/`) instead of
+  being deleted, with `DTRH_AUDIO_DIR`, `DTRH_RETAIN_DAYS` pruning and a
+  `DTRH_RETAIN_MIN_FREE_MB` guard that switches archiving off rather than fill
+  the card. The audit trail now records the retained path per utterance.
+  Verified: two utterances archived to `/storage/7BFE-5787/audiophile/audio/`.
+* `audiophile-retranscribe.sh` — re-runs whisper over kept audio with one or more
+  models and reports latency, realtime factor and the transcripts side by side,
+  so model choice can be settled on real speech instead of synthetic clips.
 * `audiophile-model-bench.sh` — benchmarks every `ggml-*.bin` it can find (or the
   models you name) on this phone with this microphone: word error rate, latency,
   realtime factor and cold load time, per model. It builds its clips by having
